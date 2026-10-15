@@ -1,0 +1,142 @@
+{
+  "name": "@fungi.computer/veil",
+  "version": "0.0.0",
+  "description": "Team-authorized credential custody and provider access",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./nango-git": {
+      "types": "./dist/nango-git.d.ts",
+      "import": "./dist/nango-git.js"
+    },
+    "./nango": {
+      "types": "./dist/nango.d.ts",
+      "import": "./dist/nango.js"
+    },
+    "./model-credentials": {
+      "types": "./dist/model-credentials.d.ts",
+      "import": "./dist/model-credentials.js"
+    },
+    "./model-keys": {
+      "types": "./dist/model-keys.d.ts",
+      "import": "./dist/model-keys.js"
+    },
+    "./nango-model-keys": {
+      "types": "./dist/nango-model-keys.d.ts",
+      "import": "./dist/nango-model-keys.js"
+    },
+    "./model-key-network": {
+      "types": "./dist/model-key-network.d.ts",
+      "import": "./dist/model-key-network.js"
+    },
+    "./model-key-grants": {
+      "types": "./dist/model-key-grants.d.ts",
+      "import": "./dist/model-key-grants.js"
+    },
+    "./event-verifiers": {
+      "types": "./dist/event-verifiers.d.ts",
+      "import": "./dist/event-verifiers.js"
+    },
+    "./public-fetch": {
+      "types": "./dist/public-fetch.d.ts",
+      "import": "./dist/public-fetch.js"
+    },
+    "./world-seat": {
+      "types": "./dist/world-seat.d.ts",
+      "import": "./dist/world-seat.js"
+    },
+    "./nango-world-seat": {
+      "types": "./dist/nango-world-seat.d.ts",
+      "import": "./dist/nango-world-seat.js"
+    },
+    "./webhook-trigger-secrets": {
+      "types": "./dist/webhook-trigger-secrets.d.ts",
+      "import": "./dist/webhook-trigger-secrets.js"
+    },
+    "./gatekeeper": {
+      "types": "./dist/gatekeeper.d.ts",
+      "import": "./dist/gatekeeper.js"
+    },
+    "./openapi": {
+      "types": "./dist/openapi.d.ts",
+      "import": "./dist/openapi.js"
+    },
+    "./openapi-effect": {
+      "types": "./dist/openapi-effect.d.ts",
+      "import": "./dist/openapi-effect.js"
+    },
+    "./public-egress-policy": {
+      "types": "./dist/public-egress-policy.d.ts",
+      "import": "./dist/public-egress-policy.js"
+    },
+    "./owned-infrastructure": {
+      "types": "./dist/owned-infrastructure.d.ts",
+      "import": "./dist/owned-infrastructure.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "lint": "eslint src test --max-warnings=0 && ../../node_modules/.bin/oxlint --config ../../oxlint.config.ts --deny-warnings src test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
+    "test": "vitest run --dir test --exclude '**/*.integration.test.mjs' --no-file-parallelism --maxWorkers=1 --passWithNoTests=false && node --test test/owned-infrastructure.node.mjs",
+    "format:check": "node ../../tooling/repository/scripts/format-package-check.mjs",
+    "lint:anti-slop": "node ../../tooling/repository/scripts/lint-package-anti-slop.mjs"
+  },
+  "dependencies": {
+    "@fungi.computer/cairn": "workspace:*",
+    "@nangohq/node": "0.71.6",
+    "effect": "4.0.2",
+    "http-parser-js": "0.5.10",
+    "ipaddr.js": "2.2.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  },
+  "botanical": {
+    "role": "package",
+    "operations": {
+      "lint": "required",
+      "typecheck": "required",
+      "build": "required",
+      "test": "required",
+      "docs": {
+        "status": "not-applicable",
+        "reason": "Shared docs tooling not yet wired for this package"
+      },
+      "pack": {
+        "status": "not-applicable",
+        "reason": "Shared pack tooling not yet wired for this package"
+      },
+      "smoke": {
+        "status": "not-applicable",
+        "reason": "The Hub witness exercises the built package export"
+      },
+      "stranger": {
+        "status": "not-applicable",
+        "reason": "Owns no external consumer fixture yet"
+      }
+    }
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fungi-computer/veil.git"
+  }
+}
