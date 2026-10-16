@@ -1,4 +1,3 @@
-import { Nango } from "@nangohq/node";
 import * as Schema from "effect/Schema";
 import * as Exit from "effect/Exit";
 import {
@@ -144,11 +143,6 @@ export function createNangoCustodian(
   const connectBase = publicUrl(options.connectBaseUrl);
   if (!connectBase.pathname.endsWith("/")) connectBase.pathname += "/";
   const publicApi = publicUrl(options.publicApiUrl);
-  const verifier = new Nango({
-    host: server.origin,
-    apiKey: options.apiKey,
-    webhookSigningKey: options.webhookSigningKey,
-  });
   const decode = <A, I>(
     schema: Schema.Codec<A, I>,
     raw: string,
@@ -210,12 +204,21 @@ export function createNangoCustodian(
     integrationId,
     locator,
   });
-  /** Maintained HMAC over the raw body first; only then decode the operation. */
+  /**
+   * Maintained HMAC over the raw body first; only then decode the operation.
+   * The Nango SDK (and its HTTP client) loads with the first webhook rather
+   * than with every Worker that hosts a custodian.
+   */
   const verifyWebhook = (
     rawBody: string,
     signature: string,
   ): Promise<VerifiedWebhook> =>
-    Promise.resolve().then(() => {
+    import("@nangohq/node").then(({ Nango }) => {
+      const verifier = new Nango({
+        host: server.origin,
+        apiKey: options.apiKey,
+        webhookSigningKey: options.webhookSigningKey,
+      });
       if (
         !verifier.verifyIncomingWebhookRequest(rawBody, {
           "X-Nango-Hmac-Sha256": signature,
