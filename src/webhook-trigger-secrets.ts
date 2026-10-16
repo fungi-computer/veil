@@ -9,12 +9,14 @@ import {
   type EventVerifier,
 } from "./event-verifiers.js";
 
-const secretSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
-const addressSchema = z.object({
-  teamId: z.string().min(1),
-  bindingId: z.string().min(1),
-  secretGeneration: z.number().int().nonnegative(),
-});
+const secretSchema = z.lazy(() => z.string().regex(/^[A-Za-z0-9_-]{43}$/u));
+const addressSchema = z.lazy(() =>
+  z.object({
+    teamId: z.string().min(1),
+    bindingId: z.string().min(1),
+    secretGeneration: z.number().int().nonnegative(),
+  }),
+);
 
 /**
  * One event binding's secret. Rotating bumps `secretGeneration`, which derives

@@ -42,15 +42,23 @@ export type EventRequest = Readonly<{
   nowSeconds: number;
 }>;
 
-const secretSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
-const fungiSignatureSchema = z.string().regex(/^v1=[a-f0-9]{64}$/u);
-const githubSignatureSchema = z.string().regex(/^sha256=[a-f0-9]{64}$/u);
-const githubDeliverySchema = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/u);
-const timestampSchema = z
-  .string()
-  .regex(/^\d{1,12}$/u)
-  .transform(Number)
-  .pipe(z.number().int().nonnegative());
+const secretSchema = z.lazy(() => z.string().regex(/^[A-Za-z0-9_-]{43}$/u));
+const fungiSignatureSchema = z.lazy(() =>
+  z.string().regex(/^v1=[a-f0-9]{64}$/u),
+);
+const githubSignatureSchema = z.lazy(() =>
+  z.string().regex(/^sha256=[a-f0-9]{64}$/u),
+);
+const githubDeliverySchema = z.lazy(() =>
+  z.string().regex(/^[A-Za-z0-9._-]{1,128}$/u),
+);
+const timestampSchema = z.lazy(() =>
+  z
+    .string()
+    .regex(/^\d{1,12}$/u)
+    .transform(Number)
+    .pipe(z.number().int().nonnegative()),
+);
 
 /** A signed timestamp further than this from the receiver's clock is refused. */
 export const WEBHOOK_SIGNATURE_MAX_SKEW_SECONDS = 300;
@@ -175,11 +183,15 @@ export function verifySecretUrl(
   return { status: "ok", eventId: eventIds.delivery.generate() };
 }
 
-const standardIdSchema = z.string().regex(/^[\x21-\x7e]{1,256}$/u);
-const standardSignatureSchema = z
-  .string()
-  .regex(/^v1,[A-Za-z0-9+/]+={0,2}$/u)
-  .transform((value) => Buffer.from(value.slice(3), "base64"));
+const standardIdSchema = z.lazy(() =>
+  z.string().regex(/^[\x21-\x7e]{1,256}$/u),
+);
+const standardSignatureSchema = z.lazy(() =>
+  z
+    .string()
+    .regex(/^v1,[A-Za-z0-9+/]+={0,2}$/u)
+    .transform((value) => Buffer.from(value.slice(3), "base64")),
+);
 
 /**
  * The Standard Webhooks key bytes behind a binding's secret, in the
