@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
