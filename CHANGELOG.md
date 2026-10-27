@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.2.1
+
+### Patch Changes
+
+- Changes since 0.2.0:
+
+  - fix(release): inline Gitleaks fixture allows
+
 ## 0.2.0
 
 ### Minor Changes

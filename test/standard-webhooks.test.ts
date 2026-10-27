@@ -8,7 +8,7 @@ import {
 } from "../src/event-verifiers.js";
 
 // The reference vector from the Standard Webhooks specification.
-const vectorSecret = "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+const vectorSecret = "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"; //gitleaks:allow
 const vectorBody = new TextEncoder().encode('{"test": 2432232314}');
 const vector = (
   headers: Record<string, string>,
