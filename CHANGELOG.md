@@ -1,5 +1,16 @@
 # @fungi.computer/veil
 
+## 0.3.0
+
+### Minor Changes
+
+- Changes since 0.2.1:
+
+  - fix(veil): follow one pinned OFAC download redirect
+  - feat(veil): add read-only snapshot provider routes
+  - fix(veil): distinguish unavailable credential methods
+  - fix(veil): disallow hosted Claude subscription login
+
 ## 0.2.1
 
 ### Patch Changes

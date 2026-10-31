@@ -3,12 +3,11 @@
  * provider login policy: the local runtime, the TUI login registry and the Hub
  * read it; none of them decides visibility on its own.
  *
- * Stance: like Pi and OpenCode, offer a person's own subscription locally and
- * hosted, and turn a provider off through `subscriptionKillSwitch` if it
- * objects or blocks tokens. A subscription is always one person's: never
- * Team-scoped, shared or pooled. The new OpenAI ChatGPT plan flow is
- * local-only; hosted use awaits OpenAI approval. The retired Codex provider
- * is forbidden on both hosts.
+ * Offer a person's own Claude or ChatGPT subscription locally, never on
+ * hosted Fungi. A subscription is always one person's: never Team-scoped,
+ * shared or pooled. `subscriptionKillSwitch` can turn off a provider if it
+ * objects or blocks tokens. Hosted BYOK uses API keys. The retired Codex
+ * provider is forbidden on both hosts.
  * See wiki/3-resources/decisions/adr-byok-model-keys-v1.md.
  */
 
@@ -35,6 +34,11 @@ const allowed: CredentialPermission = { status: "allowed" };
 const unreviewed: CredentialPermission = { status: "unreviewed" };
 const notOffered: CredentialPermission = {
   status: "forbidden",
+  reason: "Fungi does not offer this credential method on this host",
+  source: "wiki/3-resources/decisions/adr-byok-model-keys-v1.md",
+};
+const providerNotOffered: CredentialPermission = {
+  status: "forbidden",
   reason: "The provider does not offer this credential method",
   source: "provider documentation",
 };
@@ -45,7 +49,7 @@ const retiredCodex: CredentialPermission = {
 };
 const apiKeyOnly = {
   api_key: { local: allowed, hosted: allowed },
-  subscription: { local: notOffered, hosted: notOffered },
+  subscription: { local: providerNotOffered, hosted: providerNotOffered },
 } satisfies ProviderCredentialPolicy;
 
 /**
@@ -59,9 +63,8 @@ export const modelCredentialPolicy = Object.freeze({
   },
   anthropic: {
     api_key: { local: allowed, hosted: allowed },
-    // Local: Pi's Claude Pro/Max OAuth, as Pi and OpenCode ship it. Hosted: the
-    // unmodified Claude Code binary on the owner's Computer, signed in by them.
-    subscription: { local: allowed, hosted: allowed },
+    // Local: Pi's Claude Pro/Max OAuth. Hosted: no Claude subscription login.
+    subscription: { local: allowed, hosted: notOffered },
   },
   "openai-codex": {
     api_key: { local: retiredCodex, hosted: retiredCodex },
@@ -73,8 +76,9 @@ export const modelCredentialPolicy = Object.freeze({
       local: allowed,
       hosted: {
         status: "forbidden",
-        reason: "ChatGPT plan usage in a hosted app requires OpenAI approval",
-        source: "https://developers.openai.com/siwc/token-sharing-open-source",
+        reason:
+          "Fungi does not offer ChatGPT subscription sign-in on hosted Fungi; approval alone would not enable it",
+        source: "wiki/3-resources/decisions/adr-byok-model-keys-v1.md",
       },
     },
   },

@@ -35,7 +35,27 @@ it("records one per-provider policy for local and hosted credentials", () => {
   ) => loginAllowed({ providerId, method, host, scope: "user" });
   expect(allowed("anthropic", "api_key", "hosted")).toBe(true);
   expect(allowed("anthropic", "subscription", "local")).toBe(true);
-  expect(allowed("anthropic", "subscription", "hosted")).toBe(true);
+  expect(allowed("anthropic", "subscription", "hosted")).toBe(false);
+  expect(
+    modelCredentialPermission("anthropic", "subscription", "hosted"),
+  ).toEqual({
+    status: "forbidden",
+    reason: "Fungi does not offer this credential method on this host",
+    source: "wiki/3-resources/decisions/adr-byok-model-keys-v1.md",
+  });
+  for (const host of ["local", "hosted"] as const)
+    expect(modelCredentialPermission("fungi", "api_key", host)).toEqual(
+      modelCredentialPermission("anthropic", "subscription", "hosted"),
+    );
+  for (const providerId of ["openrouter", "openai-compatible"])
+    for (const host of ["local", "hosted"] as const)
+      expect(
+        modelCredentialPermission(providerId, "subscription", host),
+      ).toEqual({
+        status: "forbidden",
+        reason: "The provider does not offer this credential method",
+        source: "provider documentation",
+      });
   expect(allowed("openai-codex", "subscription", "local")).toBe(false);
   expect(allowed("openai-codex", "subscription", "hosted")).toBe(false);
   expect(
@@ -327,8 +347,9 @@ it("allows ChatGPT plan usage only for a local user's own subscription", () => {
   expect(modelCredentialPermission("openai", "subscription", "hosted")).toEqual(
     {
       status: "forbidden",
-      reason: "ChatGPT plan usage in a hosted app requires OpenAI approval",
-      source: "https://developers.openai.com/siwc/token-sharing-open-source",
+      reason:
+        "Fungi does not offer ChatGPT subscription sign-in on hosted Fungi; approval alone would not enable it",
+      source: "wiki/3-resources/decisions/adr-byok-model-keys-v1.md",
     },
   );
   expect(loginAllowed({ ...request, host: "local" }, { openai: true })).toBe(
