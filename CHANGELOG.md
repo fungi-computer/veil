@@ -1,5 +1,25 @@
 # @fungi.computer/veil
 
+## 0.4.0
+
+### Minor Changes
+
+- Changes since 0.3.0:
+
+  - feat(oyster): serve agent servers through veil connections
+  - fix(oyster): declare the model-key routes and keep route law clean
+  - feat(oyster): bring your own model key on standalone Oyster
+  - fix(veil): export the contract types the public ports expose
+  - fix(veil): export the refusal code type its error exposes
+  - fix(veil): drop the unused vault type re-export
+  - fix(veil): drop the private applyPlacement re-export
+  - fix(veil): forward connection request bodies as bytes and keep error causes
+  - feat(veil): connections core with sealed custody adapter
+
+### Patch Changes
+
+- @fungi.computer/forage@0.3.1
+
 ## 0.3.0
 
 ### Minor Changes

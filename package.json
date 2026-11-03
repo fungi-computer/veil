@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
@@ -22,6 +22,10 @@
     "./model-credentials": {
       "types": "./dist/model-credentials.d.ts",
       "import": "./dist/model-credentials.js"
+    },
+    "./credential-store": {
+      "types": "./dist/credential-store.d.ts",
+      "import": "./dist/credential-store.js"
     },
     "./model-keys": {
       "types": "./dist/model-keys.d.ts",
@@ -78,6 +82,10 @@
     "./owned-infrastructure": {
       "types": "./dist/owned-infrastructure.d.ts",
       "import": "./dist/owned-infrastructure.js"
+    },
+    "./connections": {
+      "types": "./dist/connections/index.d.ts",
+      "import": "./dist/connections/index.js"
     }
   },
   "files": [
@@ -96,6 +104,8 @@
   },
   "dependencies": {
     "@fungi.computer/cairn": "workspace:*",
+    "@fungi.computer/forage": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
     "@nangohq/node": "0.71.6",
     "effect": "4.0.2",
     "http-parser-js": "0.5.10",
@@ -103,6 +113,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@fungi.computer/watchdog": "workspace:*",
     "@types/node": "24.13.3",
     "typescript": "5.9.3",
     "vitest": "4.1.11"

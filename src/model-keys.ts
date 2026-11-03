@@ -66,6 +66,30 @@ export function modelKeyBaseUrl(
   return url.href.replace(/\/+$/u, "");
 }
 
+/** A stored key as an owner sees it: no secret, no custody locator. */
+export type ModelKeyRecord = Readonly<{
+  keyId: string;
+  provider: ModelKeyProvider;
+  label: string;
+  createdAt: number;
+  validatedAt: number;
+}>;
+
+/**
+ * The neutral model-key seam every host composes: standalone Oyster over
+ * Veil's credential store, the Hub over its Nango custodian. `seal` validates
+ * with the provider before storing; `send` is the only place a key meets a
+ * request.
+ */
+export type ModelKeyVault = Readonly<{
+  seal: (
+    input: Readonly<{ provider: string; label: string; apiKey: string }>,
+  ) => Promise<ModelKeyRecord>;
+  list: () => Promise<readonly ModelKeyRecord[]>;
+  remove: (keyId: string) => Promise<"deleted" | "absent">;
+  send: (keyId: string, request: Request) => Promise<Response>;
+}>;
+
 /** Private to the Team owner and the custodian adapter; never a public field. */
 export type ModelKeyAccess = Readonly<{
   locator: string;
