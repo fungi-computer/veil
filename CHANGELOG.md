@@ -1,5 +1,32 @@
 # @fungi.computer/veil
 
+## 0.5.0
+
+### Minor Changes
+
+- Changes since 0.4.0:
+
+  - fix(connections): keep the provider type free of SDK declarations and order
+    webhook checks
+  - fix(connections): satisfy the lint, type and suppression gates
+  - feat(connections): let Nango hold credentials and run sign-ins as optional
+    custody
+  - feat(connections): sign in to MCP and REST connections on the hub
+  - feat(connections): bring MCP connections and the one connections port to the
+    hub
+  - feat(connections): one connections panel and port on the standalone host
+  - perf(veil): keep the MCP client and Forage out of the Team's eager graph
+  - fix(veil): call the store transaction as a method
+  - fix(veil): name the connector module and report undecodable tables without a
+    swallow
+  - fix(hub): satisfy the gates for the connections-backed openapi connectors
+  - feat(hub): serve openapi connectors from the veil connections core
+  - feat(veil): connection labels, owner test calls and cleanup visibility
+  - feat(veil): connection records with updates, effects and typed calls
+  - fix(oyster): classify the sign-in callback route and update the settings
+    fixtures
+  - feat(veil): oauth credentials for connections
+
 ## 0.4.0
 
 ### Minor Changes

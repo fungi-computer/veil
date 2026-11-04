@@ -1,8 +1,4 @@
 import * as Schema from "effect/Schema";
-import {
-  isJSONRPCRequest,
-  parseJSONRPCMessage,
-} from "@modelcontextprotocol/client";
 import { assertPublicHostName } from "../model-key-network.js";
 import type { createPublicEgressPolicy } from "../public-egress-policy.js";
 import { ConnectionsError, type Tools } from "./contract.js";
@@ -50,8 +46,11 @@ export async function admitRequest(
   }
   if (request.body === null) return request;
   const bytes = await boundedBytes(request.clone());
-  if (endpoint.kind === "mcp" && tools !== "all") {
+  if (endpoint.kind === "mcp" && Array.isArray(tools)) {
     let name: string | null = null;
+    // The SDK stays out of startup: it loads when a listed MCP grant first meets a body.
+    const { isJSONRPCRequest, parseJSONRPCMessage } =
+      await import("@modelcontextprotocol/client");
     try {
       const message = parseJSONRPCMessage(
         jsonValue(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),

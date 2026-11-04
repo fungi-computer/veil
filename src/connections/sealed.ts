@@ -1,7 +1,9 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { oauthBundleJson } from "./oauth.js";
 import {
   ConnectionsError,
+  type Credential,
   type CustodyAdapter,
   type Placement,
 } from "./contract.js";
@@ -58,6 +60,21 @@ const refusal = (cause: unknown) => {
   }
 };
 
+/** Attach the sealed secret the way the credential says. */
+function authorized(
+  credential: Credential,
+  secret: string,
+  request: Request,
+): Request {
+  if (credential.kind === "static")
+    return applyPlacement(request, credential.placement, secret);
+  if (credential.kind === "none") return request;
+  const bundle = Schema.decodeUnknownOption(oauthBundleJson)(secret);
+  if (bundle._tag === "None" || bundle.value.tokens === undefined)
+    throw new ConnectionsError("reconnect_required");
+  return applyPlacement(request, "bearer", bundle.value.tokens.access_token);
+}
+
 /** Default custody: a thin adapter over the shared credential store. `send` is the checked public transport. */
 export function createSealedCustody(options: {
   vault: CredentialVault;
@@ -77,15 +94,21 @@ export function createSealedCustody(options: {
         catch: refusal,
       }),
     inject: (address, locator, request) =>
+      address.credential.kind === "none"
+        ? Effect.tryPromise({
+            try: () => options.send(request),
+            catch: refusal,
+          })
+        : Effect.tryPromise({
+            try: () =>
+              options.vault.withSecret(locator, (secret) =>
+                options.send(authorized(address.credential, secret, request)),
+              ),
+            catch: refusal,
+          }),
+    open: (_address, locator) =>
       Effect.tryPromise({
-        try: () =>
-          options.vault.withSecret(locator, (secret) =>
-            options.send(
-              address.credential.kind === "static"
-                ? applyPlacement(request, address.credential.placement, secret)
-                : request,
-            ),
-          ),
+        try: () => options.vault.withSecret(locator, (secret) => secret),
         catch: refusal,
       }),
     remove: (_address, locator) =>

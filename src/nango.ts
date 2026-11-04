@@ -8,24 +8,24 @@ import {
 } from "./index.js";
 
 const text = Schema.NonEmptyString;
-const tagsSchema = Schema.Struct({
+export const tagsSchema = Schema.Struct({
   veil_team_id: text,
   veil_attempt_id: text,
   veil_principal_id: text,
 });
-const sessionSchema = Schema.Struct({
+export const sessionSchema = Schema.Struct({
   data: Schema.Struct({
     token: text,
     connect_link: text,
     expires_at: Schema.DateFromString,
   }),
 });
-const webhookEnvelopeSchema = Schema.Struct({
+export const webhookEnvelopeSchema = Schema.Struct({
   type: text,
   operation: Schema.optional(text),
 });
 /** Nango auth webhook fields shared by creation and refresh notifications. */
-const authWebhookSchema = Schema.Struct({
+export const authWebhookSchema = Schema.Struct({
   type: Schema.Literal("auth"),
   operation: Schema.Literals(["creation", "refresh"]),
   success: Schema.Boolean,
@@ -74,7 +74,7 @@ export type NangoCustodianOptions = Readonly<{
 /** A custodian that stops answering is an outage, retried later, never a dead credential. */
 const defaultRequestTimeoutMs = 10_000;
 
-function publicUrl(value: string): URL {
+export function publicUrl(value: string): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -94,7 +94,7 @@ function publicUrl(value: string): URL {
 
 /** The Connect document handed to browsers: Nango's issued link, confined to
  * the configured Connect UI and pinned to the configured public API. */
-function connectDocument(
+export function connectDocument(
   session: Readonly<{ token: string; connectUrl: string }>,
   base: URL,
   api: URL,

@@ -1,5 +1,6 @@
 import {
   createOpenApiDoor,
+  type OpenApiCredentialKeyring,
   type OpenApiCredentialStore,
   type OpenApiOAuthProvider,
   type OpenApiDoorOptions,
@@ -8,6 +9,11 @@ import { createOpenApiEffects, type OpenApiEffects } from "./openapi-effect.js";
 import { createDnsOverHttpsResolver } from "./model-key-network.js";
 import type { PublicConnect } from "./public-fetch.js";
 import { createNangoCustodian } from "./nango.js";
+import { ConnectionsError } from "./connections/contract.js";
+import {
+  createNangoCustody,
+  type ConnectionsCustodian,
+} from "./connections/nango.js";
 import { createWebhookTriggerSecrets } from "./webhook-trigger-secrets.js";
 import { createNangoGitCustodian } from "./nango-git.js";
 import { createNangoModelKeyCustodian } from "./nango-model-keys.js";
@@ -46,6 +52,7 @@ import * as Exit from "effect/Exit";
 
 export { providerFetch };
 export type { ProviderEgress, ProviderRoute };
+export type { ConnectionsCustodian };
 
 /** Private Worker bindings, never Team storage or public response fields. */
 export type VeilBindings = ProviderKeyBindings &
@@ -59,6 +66,10 @@ export type VeilBindings = ProviderKeyBindings &
     NANGO_WEBHOOK_SIGNING_KEY?: string;
     NANGO_GITHUB_INTEGRATION_ID?: string;
     NANGO_GITHUB_GIT_INTEGRATION_ID?: string;
+    /** API-key integration that holds pasted credentials for Team connections. */
+    NANGO_CONNECTIONS_INTEGRATION_ID?: string;
+    /** Comma-separated Nango integrations an owner may sign in through for connections. */
+    NANGO_CONNECTIONS_OAUTH_INTEGRATIONS?: string;
     /** Public Connect UI base that Nango's issued links must stay under. */
     NANGO_CONNECT_BASE_URL?: string;
     /** Public Nango API origin the Connect UI in the browser must call. */
@@ -78,6 +89,46 @@ export type VeilBindings = ProviderKeyBindings &
      */
     HUB_LOCAL_MODE?: string;
   }>;
+
+/**
+ * Optional Nango custody for Team connections. A Hub with none of the Nango
+ * bindings keeps sealed custody and still connects OAuth MCP and OpenAPI.
+ */
+export function configuredConnectionsCustody(
+  env: VeilBindings,
+): ConnectionsCustodian | undefined {
+  if (
+    !env.NANGO_SERVER_URL ||
+    !env.NANGO_API_KEY ||
+    !env.NANGO_WEBHOOK_SIGNING_KEY ||
+    !env.NANGO_CONNECT_BASE_URL ||
+    !env.NANGO_PUBLIC_API_URL ||
+    !env.NANGO_CONNECTIONS_INTEGRATION_ID
+  )
+    return undefined;
+  try {
+    return createNangoCustody({
+      serverUrl: env.NANGO_SERVER_URL,
+      apiKey: env.NANGO_API_KEY,
+      webhookSigningKey: env.NANGO_WEBHOOK_SIGNING_KEY,
+      staticIntegrationId: env.NANGO_CONNECTIONS_INTEGRATION_ID,
+      connectBaseUrl: env.NANGO_CONNECT_BASE_URL,
+      publicApiUrl: env.NANGO_PUBLIC_API_URL,
+    });
+  } catch {
+    throw new VeilError("unavailable");
+  }
+}
+
+/** The Nango integrations an owner may sign in through for connections. */
+export function configuredConnectionsOAuthIntegrations(
+  env: VeilBindings,
+): readonly string[] {
+  return (env.NANGO_CONNECTIONS_OAUTH_INTEGRATIONS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+}
 
 export function configuredGitHubState(env: VeilBindings) {
   const metadataIntegrationId = env.NANGO_GITHUB_INTEGRATION_ID;
@@ -237,7 +288,9 @@ export async function verifyVeilWebhook(
   signature: string,
 ) {
   const state = configuredGitHubState(env);
-  if (state.github === "off") throw new VeilError("github_not_configured");
+  const connectionIntegrations = configuredConnectionsOAuthIntegrations(env);
+  if (state.github === "off" && connectionIntegrations.length === 0)
+    throw new VeilError("github_not_configured");
   const decoded = Schema.decodeUnknownExit(
     Schema.fromJsonString(
       Schema.Struct({
@@ -246,6 +299,13 @@ export async function verifyVeilWebhook(
     ),
   )(rawBody);
   if (Exit.isFailure(decoded)) throw new VeilError("invalid_completion");
+  // A connection's sign-in runs through an integration the operator listed for it.
+  if (connectionIntegrations.includes(decoded.value.providerConfigKey))
+    return {
+      profile: "connections" as const,
+      ownerId: await verifiedConnectionOwner(env, rawBody, signature),
+    };
+  if (state.github === "off") throw new VeilError("github_not_configured");
   if (decoded.value.providerConfigKey === state.gitIntegrationId) {
     return {
       profile: "computer-git" as const,
@@ -262,6 +322,30 @@ export async function verifyVeilWebhook(
     };
   }
   throw new VeilError("invalid_completion");
+}
+
+/** The signed sign-in names the Team that began it; only a verified body is believed. */
+async function verifiedConnectionOwner(
+  env: VeilBindings,
+  rawBody: string,
+  signature: string,
+): Promise<string> {
+  const custody = configuredConnectionsCustody(env);
+  if (custody === undefined) throw new VeilError("unavailable");
+  try {
+    return (await custody.verifyCompletion(rawBody, signature)).ownerId;
+  } catch (cause) {
+    if (cause instanceof ConnectionsError)
+      throw new VeilError(
+        cause.code === "unsupported"
+          ? "unsupported"
+          : cause.code === "unavailable"
+            ? "unavailable"
+            : "invalid_completion",
+        { cause },
+      );
+    throw cause;
+  }
 }
 
 function configuredCustodian(
@@ -304,6 +388,17 @@ export type OpenApiHostOptions = Readonly<{
   oauthProviders?: Readonly<Record<string, OpenApiOAuthProvider>>;
 }>;
 
+/** The keyring that seals OpenAPI credentials; only Gatekeeper reads the master key. */
+export function openApiCredentialKeyring(
+  env: VeilBindings,
+  previous?: Readonly<Record<string, string>>,
+): OpenApiCredentialKeyring | undefined {
+  const key = env.OPENAPI_CREDENTIAL_MASTER_KEY;
+  if (!key) return undefined;
+  const id = env.OPENAPI_CREDENTIAL_KEY_ID ?? "primary";
+  return { activeKeyId: id, keys: { ...previous, [id]: key } };
+}
+
 /** Gatekeeper owns the common opaque configuration for both runtime facades. */
 function openApiHostConfiguration(
   env: VeilBindings,
@@ -316,18 +411,8 @@ function openApiHostConfiguration(
   };
   if (options.oauthProviders)
     doorOptions.oauthProviders = options.oauthProviders;
-  if (env.OPENAPI_CREDENTIAL_MASTER_KEY)
-    doorOptions.custody = {
-      keys: {
-        activeKeyId: env.OPENAPI_CREDENTIAL_KEY_ID ?? "primary",
-        keys: {
-          ...options.previousCredentialKeys,
-          [env.OPENAPI_CREDENTIAL_KEY_ID ?? "primary"]:
-            env.OPENAPI_CREDENTIAL_MASTER_KEY,
-        },
-      },
-      store: options.store,
-    };
+  const keys = openApiCredentialKeyring(env, options.previousCredentialKeys);
+  if (keys) doorOptions.custody = { keys, store: options.store };
   return doorOptions;
 }
 
