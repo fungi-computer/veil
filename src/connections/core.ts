@@ -4,6 +4,7 @@ import { assertPublicHostName } from "../model-key-network.js";
 import { createPublicEgressPolicy } from "../public-egress-policy.js";
 import {
   ConnectionsError,
+  attemptTtlMs,
   callInputSchema,
   completeInputSchema,
   draftSchema,
@@ -42,13 +43,12 @@ import {
   json,
   registryRow,
   sync,
+  type AttemptRow,
   type ConnectionRow,
 } from "./internal.js";
 import { createOAuthFlow, type OAuthStore } from "./oauth-flow.js";
 import { listMcpTools } from "./discover.js";
 import { createUpdate } from "./update.js";
-
-const attemptTtlMs = 10 * 60 * 1000;
 
 const grantRow = Schema.Struct({
   connectionId: identifier,
@@ -64,6 +64,7 @@ const receiptRow = Schema.Struct({
     Schema.Struct({
       connectionId: identifier,
       authorizeUrl: Schema.optional(Schema.String),
+      attemptId: Schema.optional(Schema.String),
       version: Schema.optional(Schema.Number),
     }),
   ),
@@ -124,6 +125,23 @@ export function createConnections(options: ConnectionsOptions) {
     )[0];
     if (!row) throw new ConnectionsError("denied");
     return row;
+  };
+  /** The origins a named provider's credential may reach, or nothing when this host does not hold it. */
+  const providerOrigins = (provider: string) =>
+    options.oauth?.providers?.[provider]?.apiOrigins ??
+    options.custodyProviders?.[provider]?.apiOrigins;
+  const assertProviderOrigin = (
+    credential: ConnectionRow["credential"],
+    target: string,
+    refusal: "invalid_input" | "denied",
+  ) => {
+    if (credential.kind !== "oauth" || credential.provider === undefined)
+      return;
+    const origins = providerOrigins(credential.provider);
+    // A provider this host no longer holds must be connected again.
+    if (origins === undefined) throw new ConnectionsError("reconnect_required");
+    if (!origins.includes(new URL(target).origin))
+      throw new ConnectionsError(refusal);
   };
   /** One live connection per binding name, so an Agent's module name is unambiguous. */
   const assertNameFree = (name: string, exceptId: string | null) => {
@@ -223,7 +241,9 @@ export function createConnections(options: ConnectionsOptions) {
                 parsed.credential.clientId !== undefined ||
                 (options.oauth?.providers?.[parsed.credential.provider] ===
                 undefined
-                  ? options.custody.connect === undefined
+                  ? options.custody.connect === undefined ||
+                    options.custodyProviders?.[parsed.credential.provider] ===
+                      undefined
                   : parsed.surface.kind !== "openapi")))
         )
           throw new ConnectionsError("invalid_input");
@@ -244,17 +264,22 @@ export function createConnections(options: ConnectionsOptions) {
         return {
           connectionId: replay.connectionId,
           authorizeUrl: replay.authorizeUrl ?? null,
+          attemptId: replay.attemptId ?? null,
         };
       yield* sync(() => {
         assertNameFree(draft.name, null);
       });
       const endpoint = yield* sync(() =>
         publicUrl(
-          draft.surface.kind === "mcp"
-            ? draft.surface.url
-            : draft.surface.baseUrl,
+          draft.surface.kind === "openapi"
+            ? draft.surface.baseUrl
+            : draft.surface.url,
         ),
       );
+      // A provider's credential is sent only to the origins its operator declared.
+      yield* sync(() => {
+        assertProviderOrigin(draft.credential, endpoint, "invalid_input");
+      });
       const surface = draft.surface;
       const decoded =
         surface.kind === "openapi"
@@ -276,6 +301,7 @@ export function createConnections(options: ConnectionsOptions) {
               endpoint,
               fingerprint(draft),
               table,
+              draft.surface.kind,
             )
           : oauthFlow.begin(
               actor,
@@ -349,7 +375,7 @@ export function createConnections(options: ConnectionsOptions) {
             JSON.stringify({ connectionId }),
           );
           bump();
-          return { connectionId, authorizeUrl: null };
+          return { connectionId, authorizeUrl: null, attemptId: null };
         }),
       ).pipe(
         Effect.tapError(() =>
@@ -390,12 +416,13 @@ export function createConnections(options: ConnectionsOptions) {
           JSON.stringify({
             connectionId: stored.id,
             authorizeUrl: input.authorizeUrl,
+            attemptId: input.state,
           }),
         );
         bump();
       });
     },
-    claimCustody: (state) =>
+    claimCustody: (state, principalId) =>
       transactionSync(() => {
         if (!state.startsWith(`${ownerId}.`))
           throw new ConnectionsError("denied");
@@ -407,7 +434,8 @@ export function createConnections(options: ConnectionsOptions) {
         // A browser attempt holds a sealed verifier; only a custodian's has none.
         if (
           attempt?.status !== "pending" ||
-          attempt.pkceVerifierSealed !== null
+          attempt.pkceVerifierSealed !== null ||
+          attempt.actor !== principalId
         )
           throw new ConnectionsError("denied");
         if (attempt.expiresAt <= options.clock()) {
@@ -738,6 +766,9 @@ export function createConnections(options: ConnectionsOptions) {
       )
         return yield* Effect.fail(new ConnectionsError("denied"));
       yield* sync(admit);
+      yield* sync(() => {
+        assertProviderOrigin(row.credential, request.url, "denied");
+      });
       if (row.locator === null && row.credential.kind === "static")
         return yield* Effect.fail(new ConnectionsError("denied"));
       const response =
@@ -777,19 +808,20 @@ export function createConnections(options: ConnectionsOptions) {
     init: Parameters<NarrowFetch>[1],
   ) =>
     Effect.runPromise(
-      deliver(admit, (row, tools) =>
-        row.surface.kind === "openapi" && tools !== "all"
+      deliver(admit, (row, tools) => {
+        const { kind, url } = row.surface;
+        return kind === "openapi" && tools !== "all"
           ? // Effect and name grants are enforced per operation, by `call`.
             Effect.fail(new ConnectionsError("denied"))
           : io(() =>
               admitRequest(
-                { kind: row.surface.kind, url: row.surface.url },
+                { kind, url },
                 tools,
                 new Request(target, init),
                 policy,
               ),
-            ).pipe(Effect.map((request) => ({ request, operation: null }))),
-      ),
+            ).pipe(Effect.map((request) => ({ request, operation: null })));
+      }),
     );
   const egress = (agentId: string, input: EgressRef): NarrowFetch => {
     const ref = decode(egressRefSchema, input);
@@ -908,6 +940,50 @@ export function createConnections(options: ConnectionsOptions) {
       return yield* io(() => decodeTable(row.surface.table));
     });
 
+  /**
+   * A custodian's signed completion can be lost. Ask it directly about each
+   * open sign-in it is running and settle the ones it finished; bounded, and
+   * harmless to repeat because the attempt is single use.
+   */
+  const awaitingCustody = () =>
+    rows(
+      attemptRow,
+      "SELECT * FROM veil_connection_attempts WHERE status = 'pending' AND pkceVerifierSealed IS NULL AND issuer LIKE 'custody:%' AND expiresAt > ? ORDER BY expiresAt LIMIT 16",
+      options.clock(),
+    );
+  const reconcileAttempt = (attempt: AttemptRow) =>
+    Effect.gen(function* () {
+      const find = options.custody.find;
+      if (find === undefined) return null;
+      const row = yield* sync(() => connection(attempt.connectionId));
+      const found = yield* find(address(row), {
+        state: attempt.state,
+        actor: attempt.actor,
+        integrationId: (attempt.issuer ?? "").slice("custody:".length),
+      });
+      if (found.status === "ambiguous")
+        return yield* Effect.fail(new ConnectionsError("conflict"));
+      if (found.status === "unresolved") return null;
+      const done = yield* oauthFlow.completeCustody({
+        state: attempt.state,
+        locator: found.locator,
+        principalId: attempt.actor,
+        integrationId: (attempt.issuer ?? "").slice("custody:".length),
+      });
+      return done.connectionId;
+    });
+  /** The connections a custodian finished that no webhook told us about. */
+  const reconcilePending = () =>
+    Effect.gen(function* () {
+      const settled: string[] = [];
+      for (const attempt of yield* sync(awaitingCustody)) {
+        const outcome = yield* reconcileAttempt(attempt).pipe(Effect.result);
+        if (outcome._tag === "Success" && outcome.success !== null)
+          settled.push(outcome.success);
+      }
+      return settled;
+    });
+
   const update = createUpdate({
     ownerId,
     custody: options.custody,
@@ -992,5 +1068,7 @@ export function createConnections(options: ConnectionsOptions) {
     update,
     sweep,
     cleanupPending,
+    reconcilePending,
+    awaitingCustody: () => awaitingCustody().length,
   };
 }

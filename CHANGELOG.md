@@ -1,5 +1,18 @@
 # @fungi.computer/veil
 
+## 0.6.0
+
+### Minor Changes
+
+- Changes since 0.5.0:
+
+  - feat(connections): move GitHub and Computer Git onto the shared connections
+    core
+  - fix(connections): pin each OAuth provider's credential to its declared API
+    origins
+  - feat(connections): move GitHub and Computer Git onto the shared connections
+    core
+
 ## 0.5.0
 
 ### Minor Changes

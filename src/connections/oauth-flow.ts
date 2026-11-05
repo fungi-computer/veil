@@ -61,7 +61,10 @@ export type OAuthStore = Readonly<{
     expired: boolean;
   };
   /** Consume a live attempt the custodian runs; expired ones retire. */
-  claimCustody: (state: string) => { attempt: AttemptRow; expired: boolean };
+  claimCustody: (
+    state: string,
+    principalId: string,
+  ) => { attempt: AttemptRow; expired: boolean };
   /** The attempt failed: withdraw the pending connection and clean its verifier. */
   fail: (attempt: AttemptRow) => void;
   /** Pending becomes active with its token locator; false when it is no longer pending. */
@@ -186,6 +189,7 @@ export function createOAuthFlow(deps: {
     endpoint: string,
     fingerprint: string,
     openapi: Readonly<{ table: readonly unknown[]; digest: string }> | null,
+    kind: "mcp" | "openapi",
   ) =>
     Effect.gen(function* () {
       const connect = custody.connect;
@@ -208,7 +212,7 @@ export function createOAuthFlow(deps: {
         authorityVersion: 1,
         version: 1,
         surface: {
-          kind: openapi === null ? "mcp" : "openapi",
+          kind,
           url: endpoint,
           table: openapi?.table ?? null,
           digest: openapi?.digest ?? null,
@@ -226,7 +230,11 @@ export function createOAuthFlow(deps: {
           fingerprint,
           authorizeUrl: session.connectUrl,
         });
-        return { connectionId, authorizeUrl: session.connectUrl };
+        return {
+          connectionId,
+          authorizeUrl: session.connectUrl,
+          attemptId: state,
+        };
       });
     });
 
@@ -237,7 +245,9 @@ export function createOAuthFlow(deps: {
    */
   const completeCustody = (input: CustodyCompletion) =>
     Effect.gen(function* () {
-      const claimed = yield* sync(() => store.claimCustody(input.state));
+      const claimed = yield* sync(() =>
+        store.claimCustody(input.state, input.principalId),
+      );
       if (claimed.expired)
         return yield* Effect.fail(new ConnectionsError("denied"));
       if (claimed.attempt.issuer !== `custody:${input.integrationId}`)
@@ -328,7 +338,11 @@ export function createOAuthFlow(deps: {
           fingerprint,
           authorizeUrl: started.authorizeUrl,
         });
-        return { connectionId, authorizeUrl: started.authorizeUrl };
+        return {
+          connectionId,
+          authorizeUrl: started.authorizeUrl,
+          attemptId: state,
+        };
       }).pipe(
         Effect.tapError(() =>
           sync(() => {

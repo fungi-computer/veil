@@ -12,6 +12,8 @@ export type ConnectionsRefusal =
   | "reconnect_required"
   | "pending"
   | "invalid_response"
+  /** The provider's rate limit refused the request; retry later. */
+  | "rate_limited"
   | "unavailable";
 
 /** Fixed codes only: upstream bodies, URLs and credential bytes never enter errors. */
@@ -24,6 +26,9 @@ export class ConnectionsError extends Error {
     super(code, options);
   }
 }
+
+/** How long a sign-in attempt stays open before it expires. */
+export const attemptTtlMs = 10 * 60 * 1000;
 
 export const identifier = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[A-Za-z0-9_.:-]{1,128}$/u)),
@@ -206,6 +211,15 @@ export type CustodyAdapter = Readonly<{
    * the page to send the owner to; it settles through a signed completion
    * (`complete`) carrying the `state` given here, not through our callback.
    */
+  /**
+   * Ask a custodian that ran an authorization whether it finished, when its
+   * signed completion never arrived. Only an exact match of the attempt's
+   * state, actor and integration counts; two matches are ambiguous.
+   */
+  find?: (
+    address: CustodyAddress,
+    attempt: Readonly<{ state: string; actor: string; integrationId: string }>,
+  ) => Effect.Effect<CustodyLookup, ConnectionsError>;
   connect?: (
     address: CustodyAddress,
     attempt: Readonly<{ state: string; actor: string; integrationId: string }>,
@@ -214,6 +228,10 @@ export type CustodyAdapter = Readonly<{
     ConnectionsError
   >;
 }>;
+export type CustodyLookup =
+  | Readonly<{ status: "unresolved" }>
+  | Readonly<{ status: "ambiguous" }>
+  | Readonly<{ status: "found"; locator: string }>;
 /**
  * What a custodian proves after it ran an authorization: the attempt's state
  * and where it keeps the credential. The host verifies the custodian's
@@ -222,6 +240,8 @@ export type CustodyAdapter = Readonly<{
 export type CustodyCompletion = Readonly<{
   state: string;
   locator: string;
+  /** Who the custodian says signed in; it must be who began the attempt. */
+  principalId: string;
   /** The integration the custodian ran it through; it must be the one the attempt began with. */
   integrationId: string;
 }>;
@@ -251,7 +271,16 @@ export type StaticOAuthProvider = Readonly<{
   /** Scopes requested when the owner names none. */
   scope?: string;
   client: { client_id: string; client_secret?: string | undefined };
+  /** The https origins this provider's API serves; its token goes nowhere else. */
+  apiOrigins: readonly string[];
 }>;
+
+/**
+ * An integration a custodian runs the sign-in for, as the operator declared
+ * it: the https origins its credential may reach. The custodian attaches the
+ * credential to whatever origin it is handed, so the core pins it here.
+ */
+export type CustodyProvider = Readonly<{ apiOrigins: readonly string[] }>;
 
 export type ConnectionsOptions = Readonly<{
   ownerId: string;
@@ -286,6 +315,11 @@ export type ConnectionsOptions = Readonly<{
         providers?: Readonly<Record<string, StaticOAuthProvider>>;
       }>
     | undefined;
+  /**
+   * Integrations the custodian signs in through, by id. An OAuth provider id
+   * that is neither here nor in `oauth.providers` is refused.
+   */
+  custodyProviders?: Readonly<Record<string, CustodyProvider>> | undefined;
   clock: () => number;
   ids: () => string;
 }>;

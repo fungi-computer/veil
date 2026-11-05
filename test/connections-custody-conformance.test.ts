@@ -263,7 +263,12 @@ const completion = (state: string, over: Record<string, Json> = {}) =>
   });
 
 describe("an authorization Nango runs", () => {
-  async function connected() {
+  const pinned = { gh: { apiOrigins: ["https://api.example.com"] } } as const;
+  async function connected(
+    custodyProviders: Readonly<
+      Record<string, { apiOrigins: readonly string[] }>
+    > = pinned,
+  ) {
     const seen: Seen[] = [];
     const remote = fakeNango(seen);
     vi.stubGlobal("fetch", remote.fetch);
@@ -274,14 +279,19 @@ describe("an authorization Nango runs", () => {
     const custody = createNangoCustody(nangoOptions);
     const database = new DatabaseSync(":memory:");
     let counter = 0;
-    const connections = createConnections({
+    const options = {
       ownerId: "owner-1",
       store: fromNodeSqlite(database),
       custody,
-      authorize: (actor) => actor === "owner",
+      authorize: (actor: string) => actor === "owner",
       clock: () => 1_000_000,
       ids: () => `id${String((counter += 1))}`,
-    });
+    };
+    const connections = createConnections({ ...options, custodyProviders });
+    /** The same owner's store, served under another host declaration. */
+    const reopened = (
+      next: Readonly<Record<string, { apiOrigins: readonly string[] }>>,
+    ) => createConnections({ ...options, custodyProviders: next });
     const started = await run(
       connections.begin("owner", {
         requestId: "r1",
@@ -297,7 +307,7 @@ describe("an authorization Nango runs", () => {
       }),
     );
     const state = `owner-1.id2`;
-    return { seen, remote, custody, connections, started, state };
+    return { seen, remote, custody, connections, reopened, started, state };
   }
 
   it("sends the owner to Connect, then activates only on a signed completion for that attempt", async () => {
@@ -315,6 +325,7 @@ describe("an authorization Nango runs", () => {
       ownerId: "owner-1",
       state: h.state,
       locator: "nango-conn-9",
+      principalId: "owner",
       integrationId: "gh",
     });
     expect(
@@ -357,5 +368,55 @@ describe("an authorization Nango runs", () => {
       },
     ]);
     expect(h.remote.proxied[0]?.get("provider-config-key")).toBe("gh");
+  });
+
+  it("pins each integration's credential to the origins the operator declared", async () => {
+    const h = await connected();
+    const table = (await normalizeOpenApi(spec)).operations.filter(
+      (operation) => operation.status === "supported",
+    );
+    // Another origin, or an integration this host does not declare, never begins.
+    for (const [requestId, baseUrl, provider] of [
+      ["r2", "https://evil.example/v1", "gh"],
+      ["r3", "https://api.example.com/v1", "undeclared"],
+    ] as const)
+      expect(
+        await code(
+          h.connections.begin("owner", {
+            requestId,
+            name: `pets${requestId}`,
+            surface: { kind: "openapi", baseUrl, table },
+            credential: { kind: "oauth", provider },
+          }),
+        ),
+      ).toBe("invalid_input");
+    const verified = await h.custody.verifyCompletion(
+      completion(h.state),
+      signed(completion(h.state)),
+    );
+    await run(h.connections.completeCustody(verified));
+    const { grantVersion } = await run(
+      h.connections.grant("owner", {
+        connectionId: h.started.connectionId,
+        agentId: "agent-a",
+        tools: "all",
+      }),
+    );
+    const call = (connections: typeof h.connections) =>
+      code(
+        connections.call(
+          "agent-a",
+          { connectionId: h.started.connectionId, grantVersion },
+          { operation: "listPets", input: {} },
+        ),
+      );
+    // The pin is read again at send: a narrowed or withdrawn declaration
+    // stops the credential before the custodian is asked to attach it.
+    expect(
+      await call(h.reopened({ gh: { apiOrigins: ["https://other.example"] } })),
+    ).toBe("denied");
+    expect(await call(h.reopened({}))).toBe("reconnect_required");
+    expect(h.remote.proxied).toEqual([]);
+    expect(await call(h.connections)).toBe("ok");
   });
 });

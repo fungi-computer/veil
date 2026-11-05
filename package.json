@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
@@ -10,14 +10,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./nango-git": {
-      "types": "./dist/nango-git.d.ts",
-      "import": "./dist/nango-git.js"
-    },
-    "./nango": {
-      "types": "./dist/nango.d.ts",
-      "import": "./dist/nango.js"
     },
     "./model-credentials": {
       "types": "./dist/model-credentials.d.ts",
@@ -90,6 +82,10 @@
     "./connections/nango": {
       "types": "./dist/connections/nango.d.ts",
       "import": "./dist/connections/nango.js"
+    },
+    "./github-app": {
+      "types": "./dist/github-app.d.ts",
+      "import": "./dist/github-app.js"
     },
     "./connections/source": {
       "types": "./dist/connections/source.d.ts",

@@ -8,14 +8,16 @@ import {
 import { createOpenApiEffects, type OpenApiEffects } from "./openapi-effect.js";
 import { createDnsOverHttpsResolver } from "./model-key-network.js";
 import type { PublicConnect } from "./public-fetch.js";
-import { createNangoCustodian } from "./nango.js";
-import { ConnectionsError } from "./connections/contract.js";
+import {
+  ConnectionsError,
+  type CustodyProvider,
+} from "./connections/contract.js";
+import { createGitHubAppCustody, type GitHubAppCustody } from "./github-app.js";
 import {
   createNangoCustody,
   type ConnectionsCustodian,
 } from "./connections/nango.js";
 import { createWebhookTriggerSecrets } from "./webhook-trigger-secrets.js";
-import { createNangoGitCustodian } from "./nango-git.js";
 import { createNangoModelKeyCustodian } from "./nango-model-keys.js";
 import { createNangoWorldSeatCustodian } from "./nango-world-seat.js";
 import { worldSeatEndpoint, type WorldSeatCustodian } from "./world-seat.js";
@@ -64,11 +66,17 @@ export type VeilBindings = ProviderKeyBindings &
     NANGO_SERVER_URL?: string;
     NANGO_API_KEY?: string;
     NANGO_WEBHOOK_SIGNING_KEY?: string;
+    /** The GitHub REST sign-in integration; it joins the connections sign-in list. */
     NANGO_GITHUB_INTEGRATION_ID?: string;
-    NANGO_GITHUB_GIT_INTEGRATION_ID?: string;
+    /** The Nango `github-app` integration that hands a Computer its installation token. */
+    NANGO_GITHUB_APP_INTEGRATION_ID?: string;
     /** API-key integration that holds pasted credentials for Team connections. */
     NANGO_CONNECTIONS_INTEGRATION_ID?: string;
-    /** Comma-separated Nango integrations an owner may sign in through for connections. */
+    /**
+     * Nango integrations an owner may sign in through for connections, as a
+     * JSON object from integration id to `{ "apiOrigins": ["https://…"] }`:
+     * the only origins that integration's credential is sent to.
+     */
     NANGO_CONNECTIONS_OAUTH_INTEGRATIONS?: string;
     /** Public Connect UI base that Nango's issued links must stay under. */
     NANGO_CONNECT_BASE_URL?: string;
@@ -120,30 +128,96 @@ export function configuredConnectionsCustody(
   }
 }
 
-/** The Nango integrations an owner may sign in through for connections. */
-export function configuredConnectionsOAuthIntegrations(
+/** GitHub's REST API: the only place the GitHub REST integration's token may go. */
+const GITHUB_REST_ORIGIN = "https://api.github.com";
+
+const custodyProvidersJson = Schema.fromJsonString(
+  Schema.Record(
+    Schema.String.pipe(
+      Schema.check(Schema.isPattern(/^[A-Za-z0-9_.:-]{1,128}$/u)),
+    ),
+    Schema.Struct({
+      apiOrigins: Schema.Array(Schema.String).pipe(
+        Schema.check(Schema.isMinLength(1), Schema.isMaxLength(16)),
+      ),
+    }),
+  ),
+);
+const isHttpsOrigin = (value: string) =>
+  URL.canParse(value) &&
+  new URL(value).protocol === "https:" &&
+  new URL(value).origin === value;
+
+/**
+ * The Nango integrations an owner may sign in through for connections, each
+ * pinned to the origins its credential may reach. Absent or malformed means
+ * none: a sign-in through an undeclared integration is refused, never guessed.
+ */
+export function configuredConnectionsCustodyProviders(
   env: VeilBindings,
-): readonly string[] {
-  return (env.NANGO_CONNECTIONS_OAUTH_INTEGRATIONS ?? "")
-    .split(",")
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0);
+): Readonly<Record<string, CustodyProvider>> {
+  const raw = env.NANGO_CONNECTIONS_OAUTH_INTEGRATIONS;
+  const decoded =
+    raw === undefined || raw.trim() === ""
+      ? undefined
+      : Schema.decodeUnknownExit(custodyProvidersJson)(raw);
+  const operator =
+    decoded === undefined || Exit.isFailure(decoded) ? {} : decoded.value;
+  const declared: Record<string, CustodyProvider> = {};
+  for (const [id, provider] of Object.entries(operator))
+    if (provider.apiOrigins.every(isHttpsOrigin)) declared[id] = provider;
+  // GitHub REST is pinned to its API host whatever the operator declared.
+  const rest = env.NANGO_GITHUB_INTEGRATION_ID;
+  if (rest !== undefined && rest !== "")
+    declared[rest] = { apiOrigins: [GITHUB_REST_ORIGIN] };
+  const app = configuredGitHubAppIntegration(env);
+  return Object.fromEntries(
+    Object.entries(declared).filter(([id]) => id !== app),
+  );
 }
 
-export function configuredGitHubState(env: VeilBindings) {
-  const metadataIntegrationId = env.NANGO_GITHUB_INTEGRATION_ID;
-  const gitIntegrationId = env.NANGO_GITHUB_GIT_INTEGRATION_ID;
+/**
+ * The Nango `github-app` integration through which a Computer's git gets its
+ * installation token. It is its own thing: never in the generic list, and
+ * never the same integration as GitHub REST.
+ */
+export function configuredGitHubAppIntegration(
+  env: VeilBindings,
+): string | undefined {
+  const id = env.NANGO_GITHUB_APP_INTEGRATION_ID;
+  if (id === undefined || id === "" || id === env.NANGO_GITHUB_INTEGRATION_ID)
+    return undefined;
+  return id;
+}
+
+/** Nango's GitHub App custody for Computers; absent when any binding is. */
+export function configuredGitHubAppCustody(
+  env: VeilBindings,
+): GitHubAppCustody | undefined {
+  const appIntegrationId = configuredGitHubAppIntegration(env);
   if (
-    !metadataIntegrationId ||
-    !gitIntegrationId ||
-    metadataIntegrationId === gitIntegrationId
+    appIntegrationId === undefined ||
+    !env.NANGO_SERVER_URL ||
+    !env.NANGO_API_KEY ||
+    !env.NANGO_WEBHOOK_SIGNING_KEY ||
+    !env.NANGO_CONNECT_BASE_URL ||
+    !env.NANGO_PUBLIC_API_URL ||
+    !env.NANGO_CONNECTIONS_INTEGRATION_ID
   )
-    return { github: "off" as const };
-  return {
-    github: "on" as const,
-    metadataIntegrationId,
-    gitIntegrationId,
-  };
+    return undefined;
+  try {
+    return createGitHubAppCustody({
+      serverUrl: env.NANGO_SERVER_URL,
+      apiKey: env.NANGO_API_KEY,
+      webhookSigningKey: env.NANGO_WEBHOOK_SIGNING_KEY,
+      staticIntegrationId: env.NANGO_CONNECTIONS_INTEGRATION_ID,
+      connectBaseUrl: env.NANGO_CONNECT_BASE_URL,
+      publicApiUrl: env.NANGO_PUBLIC_API_URL,
+      appIntegrationId,
+    });
+  } catch {
+    throw new VeilError("unavailable");
+  }
 }
 
 /**
@@ -245,51 +319,18 @@ export function configuredModelKeyEgress(
   });
 }
 
-export function configuredVeilCustodian(env: VeilBindings) {
-  const state = configuredGitHubState(env);
-  if (state.github === "off") throw new VeilError("github_not_configured");
-  return configuredCustodian(env, state.metadataIntegrationId);
-}
-
-/** Git Connect/cleanup and final egress use the same Git-profile integration.
- * No metadata Connection locator is translated into this profile. Veil confines
- * the issued Connect document to the configured public Connect URLs. */
-export function configuredComputerGitCustodian(env: VeilBindings) {
-  const state = configuredGitHubState(env);
-  if (state.github === "off") throw new VeilError("github_not_configured");
-  const custody = configuredCustodian(env, state.gitIntegrationId);
-  if (!env.NANGO_SERVER_URL || !env.NANGO_API_KEY)
-    throw new VeilError("unavailable");
-  try {
-    const git = createNangoGitCustodian({
-      serverUrl: env.NANGO_SERVER_URL,
-      apiKey: env.NANGO_API_KEY,
-      integrationId: state.gitIntegrationId,
-    });
-    return {
-      integrationId: state.gitIntegrationId,
-      openSession: custody.openSession,
-      verifyCompletion: custody.verifyCompletion,
-      verifyWebhook: custody.verifyWebhook,
-      findCompletion: custody.findCompletion,
-      deleteConnection: custody.deleteConnection,
-      readGit: git.readGit.bind(git),
-    };
-  } catch {
-    throw new VeilError("unavailable");
-  }
-}
-
-/** The decoded key selects one of the two configured profiles only. The
- * selected maintained custodian still verifies the original signed body. */
+/** The decoded key must name an integration this host runs a sign-in through;
+ * the maintained custodian then verifies the original signed body. The GitHub
+ * App integration settles only a Computer's git, a generic one only a
+ * connection: neither can settle the other's attempt. */
 export async function verifyVeilWebhook(
   env: VeilBindings,
   rawBody: string,
   signature: string,
 ) {
-  const state = configuredGitHubState(env);
-  const connectionIntegrations = configuredConnectionsOAuthIntegrations(env);
-  if (state.github === "off" && connectionIntegrations.length === 0)
+  const generic = Object.keys(configuredConnectionsCustodyProviders(env));
+  const app = configuredGitHubAppIntegration(env);
+  if (generic.length === 0 && app === undefined)
     throw new VeilError("github_not_configured");
   const decoded = Schema.decodeUnknownExit(
     Schema.fromJsonString(
@@ -299,29 +340,17 @@ export async function verifyVeilWebhook(
     ),
   )(rawBody);
   if (Exit.isFailure(decoded)) throw new VeilError("invalid_completion");
-  // A connection's sign-in runs through an integration the operator listed for it.
-  if (connectionIntegrations.includes(decoded.value.providerConfigKey))
-    return {
-      profile: "connections" as const,
-      ownerId: await verifiedConnectionOwner(env, rawBody, signature),
-    };
-  if (state.github === "off") throw new VeilError("github_not_configured");
-  if (decoded.value.providerConfigKey === state.gitIntegrationId) {
-    return {
-      profile: "computer-git" as const,
-      ...(await configuredComputerGitCustodian(env).verifyWebhook(
-        rawBody,
-        signature,
-      )),
-    };
-  }
-  if (decoded.value.providerConfigKey === state.metadataIntegrationId) {
-    return {
-      profile: "agent-metadata" as const,
-      ...(await configuredVeilCustodian(env).verifyWebhook(rawBody, signature)),
-    };
-  }
-  throw new VeilError("invalid_completion");
+  const key = decoded.value.providerConfigKey;
+  const profile = generic.includes(key)
+    ? ("connections" as const)
+    : key === app
+      ? ("computer-git" as const)
+      : undefined;
+  if (profile === undefined) throw new VeilError("invalid_completion");
+  return {
+    profile,
+    ownerId: await verifiedConnectionOwner(env, rawBody, signature),
+  };
 }
 
 /** The signed sign-in names the Team that began it; only a verified body is believed. */
@@ -345,33 +374,6 @@ async function verifiedConnectionOwner(
         { cause },
       );
     throw cause;
-  }
-}
-
-function configuredCustodian(
-  env: VeilBindings,
-  integrationId: string | undefined,
-) {
-  if (
-    !env.NANGO_SERVER_URL ||
-    !env.NANGO_API_KEY ||
-    !env.NANGO_WEBHOOK_SIGNING_KEY ||
-    !env.NANGO_CONNECT_BASE_URL ||
-    !env.NANGO_PUBLIC_API_URL ||
-    !integrationId
-  )
-    throw new VeilError("unavailable");
-  try {
-    return createNangoCustodian({
-      serverUrl: env.NANGO_SERVER_URL,
-      apiKey: env.NANGO_API_KEY,
-      webhookSigningKey: env.NANGO_WEBHOOK_SIGNING_KEY,
-      integrationId,
-      connectBaseUrl: env.NANGO_CONNECT_BASE_URL,
-      publicApiUrl: env.NANGO_PUBLIC_API_URL,
-    });
-  } catch {
-    throw new VeilError("unavailable");
   }
 }
 

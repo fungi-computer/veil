@@ -154,6 +154,7 @@ function harness() {
           tokenEndpoint: "https://login.example.com/token",
           scope: "pets.read",
           client: { client_id: "operator-app", client_secret: operatorSecret },
+          apiOrigins: ["https://api.example.com"],
         },
       },
     },
@@ -188,6 +189,36 @@ const code = (promise: Promise<unknown>) =>
   );
 
 describe("REST connections through an operator-registered provider", () => {
+  it("sends a provider's token only to the API origins its operator declared", async () => {
+    const h = harness();
+    const elsewhere = await h.draft("r1");
+    if (elsewhere.surface.kind !== "openapi") throw new Error("openapi draft");
+    expect(
+      await code(
+        h.run(
+          h.connections.begin("owner", {
+            ...elsewhere,
+            surface: {
+              ...elsewhere.surface,
+              baseUrl: "https://evil.example/v1",
+            },
+          }),
+        ),
+      ),
+    ).toBe("invalid_input");
+    expect(
+      await code(
+        h.run(
+          h.connections.begin("owner", {
+            ...(await h.draft("r2")),
+            credential: { kind: "oauth", provider: "unregistered" },
+          }),
+        ),
+      ),
+    ).toBe("invalid_input");
+    expect(h.remote.stats.tokenRequests).toBe(0);
+  });
+
   it("signs in with the operator's client, calls with the token, and refreshes it", async () => {
     const h = harness();
     const started = await h.run(

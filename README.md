@@ -1,69 +1,63 @@
 # Veil (`@fungi.computer/veil`)
 
-This package keeps provider credentials behind trusted Team doors. It owns
-GitHub Connection custody, model-key grants and the Agent's anonymous public-web
-fetch. A guest receives an authorized operation, not the provider token or its
-private locator.
+This package keeps provider credentials behind trusted owner doors. It owns the
+shared connections core (MCP, OpenAPI and a repository's git endpoint),
+model-key grants and the Agent's anonymous public-web fetch. A guest receives an
+authorized operation, not the provider token or its private locator.
 
 ## Set up and check
 
-The host supplies Team Connection authority and a `CredentialCustodian` to
-`createGitHubConnections`. Model input cannot select a repository or private
-locator. The `@fungi.computer/veil/nango` adapter needs a configured Nango
-origin, API key, webhook signing key, integration ID and public Connect URLs;
-these are host secrets or configuration, never browser or model input. Without
-custody configuration, report unavailable rather than manufacturing a
-connection.
+The host supplies the owner's SQLite, a `CustodyAdapter` and its live
+authorization to `createConnections` (`@fungi.computer/veil/connections`).
+Custody is `sealed` by default; Nango is the optional adapter
+(`@fungi.computer/veil/connections/nango`). Model input cannot choose a
+connection, repository or private locator. Without custody configuration, report
+unavailable rather than manufacturing a connection.
 
 Run `pnpm --filter @fungi.computer/veil test` for the package's synthetic
-custody, signed-webhook and public-fetch checks. For an exercised connection
-lifecycle, start with `test/nango-git.test.ts`; a unit test does not prove a
+custody, signed-webhook and public-fetch checks. A unit test does not prove a
 live Nango service or provider account.
 
-The root export in `src/index.ts` defines Team Connection receipts and
-`createGitHubConnections`. `package.json` lists the Nango, model-key and
-public-fetch subpaths used by trusted hosts; do not import private locators from
-these modules into guest code.
+GitHub REST is an ordinary `openapi` connection with an `oauth` credential:
+through an operator-registered provider on either custody adapter, or through a
+Nango integration. A custodian-run integration is pinned by the host
+(`configuredCustodyIntegrations`) to one surface kind and one origin, and the
+core refuses it at `begin` and again before every send, so the credential Nango
+holds never goes anywhere else. GitHub REST is pinned to `api.github.com`.
+
+A Computer's git is not a connection in this core.
+`@fungi.computer/veil/github-app` wraps Nango's `github-app` integration
+(`NANGO_GITHUB_APP_INTEGRATION_ID`, never the same as
+`NANGO_GITHUB_INTEGRATION_ID`): it opens the installation consent, verifies the
+signed completion, finds a lost one, deletes a connection and reads the current
+installation token. The Hub places that token on a request to `github.com` and
+nowhere else.
 
 ## Nango adapter
 
-`@fungi.computer/veil/nango` exports `createNangoCustodian`. The trusted host
-supplies a Nango server origin, API key, separate webhook signing key, one
-integration ID, and the public Connect UI base and public API URL. These are
-host configuration, never browser or model input. `openSession` returns the
-Connect document browsers open: Nango's issued link, confined to the configured
-Connect UI and pinned to the public API with `apiURL`. Unconfigured hosts must
-report unavailable instead of substituting fake custody.
+`createNangoCustody` takes a Nango server origin, API key, a separate webhook
+signing key, one API-key integration for pasted credentials, and the public
+Connect UI base and public API URL. These are host configuration, never browser
+or model input. `connect` returns the Connect document browsers open: Nango's
+issued link, confined to the configured Connect UI and pinned to the public API
+with `apiURL`. `verifyCompletion` verifies the raw callback body with
+`@nangohq/node` before decoding it, and the core settles only an attempt the
+owner began. Unconfigured hosts must report unavailable instead of substituting
+fake custody.
 
-The adapter uses `@nangohq/node@0.71.6` to verify the raw callback body and
-ordinary `fetch` with each invocation's AbortSignal for REST operations. It does
-not call credential-returning connection inspection. Connect sessions carry
-Team-created attempt/principal/Team tags and restrict the integration. Signed
-webhooks are verified before decoding; the adapter handles only a successful
-`creation` and a failed `refresh` (reconnect evidence) and refuses every other
-operation as `unsupported`. It also checks end-user and organization
-correlation; Team owns final activation and replay decisions. A verified
-completion the Team refuses (late, unknown, superseded, or failing activation)
-is deleted from custody, and the settled deletion is recorded.
+`inject` sends through Nango's proxy, which attaches and refreshes the
+credential; the pinned deletion endpoint returns `200 {success:true}` after
+deletion and `400 {error:{code:"unknown_connection"}}` when the connection is
+absent, and only those settle cleanup. A proxy `404` is the custodian no longer
+holding the connection and marks it reconnect-required. `find` asks Nango for
+the one connection that carries an attempt's state, actor and Team, so a sign-in
+whose signed completion was lost still settles. Cancellation stops the caller
+waiting; it does not prove upstream work stopped or rolled back.
 
-Reconciliation queries `/connections` with exact integration, end-user,
-organization and attempt tags and a limit of two. The selected server filters
-before applying that limit: zero matches remain unresolved, multiple matches are
-ambiguous, and every returned row is checked again before a single completion is
-accepted. It never selects the first candidate from an arbitrary page.
-
-The pinned public deletion endpoint returns `200 {success:true}` after deletion
-and `400 {error:{code:"unknown_connection"}}` when the selected connection is
-absent. Other responses, including generic 404 and `success:false`, do not
-settle cleanup. This mapping is specific to the selected server implementation,
-not a generic Nango error policy. Provider/proxy failures stay unavailable,
-except a proxied provider `401` carrying GitHub's own error body, which marks
-the Connection reconnect-required; Nango's own `401` envelope stays unavailable.
-
-The one proxy operation is `GET /proxy/repos/{owner}/{name}` with private Nango
-connection/integration headers. Veil's existing caller decodes credential-free
-metadata and verifies the repository ID. Cancellation stops waiting through the
-maintained transport; it does not prove upstream work stopped or rolled back.
+`configuredComputerGitIntegration(env)` names the integration through which a
+Computer's git signs in (`NANGO_GITHUB_APP_INTEGRATION_ID`);
+`NANGO_GITHUB_INTEGRATION_ID` joins the integrations an owner may sign in
+through for REST connections.
 
 ## Public-web door
 

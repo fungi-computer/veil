@@ -5,6 +5,7 @@ import {
   connectDocument,
   publicUrl,
   sessionSchema,
+  tagsSchema,
   webhookEnvelopeSchema,
 } from "../nango.js";
 import { createNangoCustodyHttp } from "../nango-custody-http.js";
@@ -53,6 +54,20 @@ const outage = (cause: unknown) =>
       : new ConnectionsError("unavailable", { cause });
 const attempt = <A>(body: () => Promise<A>) =>
   Effect.tryPromise({ try: body, catch: outage });
+
+const connectionsSchema = Schema.Struct({
+  connections: Schema.Array(
+    Schema.Struct({
+      connection_id: Schema.NonEmptyString,
+      provider_config_key: Schema.NonEmptyString,
+      tags: tagsSchema,
+      end_user: Schema.Struct({
+        id: Schema.NonEmptyString,
+        organization: Schema.Struct({ id: Schema.NonEmptyString }),
+      }),
+    }),
+  ),
+});
 
 /** A custodian that also verifies its signed completion for the host. */
 export type ConnectionsCustodian = CustodyAdapter &
@@ -169,6 +184,44 @@ export function createNangoCustody(
           expiresAt: data.expires_at.getTime(),
         };
       }),
+    find: (address, session) =>
+      attempt(async () => {
+        const query = new URLSearchParams({
+          integrationId: session.integrationId,
+          endUserId: session.actor,
+          endUserOrganizationId: address.ownerId,
+          limit: "2",
+          page: "0",
+        });
+        query.set("tags[veil_team_id]", address.ownerId);
+        query.set("tags[veil_attempt_id]", session.state);
+        query.set("tags[veil_principal_id]", session.actor);
+        const response = await http.call(
+          `/connections?${query.toString()}`,
+          signal(),
+          {},
+        );
+        if (!response.ok) throw new ConnectionsError("unavailable");
+        const { connections } = decode(
+          connectionsSchema,
+          await response.text(),
+        );
+        // The server filters before its limit; two rows prove ambiguity.
+        for (const row of connections)
+          if (
+            row.provider_config_key !== session.integrationId ||
+            row.end_user.id !== session.actor ||
+            row.end_user.organization.id !== address.ownerId ||
+            row.tags.veil_team_id !== address.ownerId ||
+            row.tags.veil_attempt_id !== session.state ||
+            row.tags.veil_principal_id !== session.actor
+          )
+            throw new ConnectionsError("invalid_response");
+        const [only, second] = connections;
+        if (only === undefined) return { status: "unresolved" } as const;
+        if (second !== undefined) return { status: "ambiguous" } as const;
+        return { status: "found", locator: only.connection_id } as const;
+      }),
     verifyCompletion: async (rawBody, signature) => {
       // Maintained HMAC over the raw body first; only then decode the event.
       const { Nango } = await import("@nangohq/node");
@@ -197,6 +250,7 @@ export function createNangoCustody(
         ownerId: row.tags.veil_team_id,
         state: row.tags.veil_attempt_id,
         locator: row.connectionId,
+        principalId: row.tags.veil_principal_id,
         integrationId: row.providerConfigKey,
       };
     },
