@@ -50,7 +50,7 @@
     "package/dist/world-seat.js",
     "package/package.json"
   ],
-  "localDependencies": ["../cairn"],
+  "localDependencies": ["../cairn", "../forage", "../mycelium"],
   "runtimeFixture": "test/stranger/runtime.mjs",
   "typechecks": [
     {

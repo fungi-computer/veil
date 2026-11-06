@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.6.1
+
+### Patch Changes
+
+- Changes since 0.6.0:
+
+  - fix(oyster): complete runtime dependency qualification closure
+
 ## 0.6.0
 
 ### Minor Changes
