@@ -593,6 +593,20 @@ describe("connections core", () => {
     ).toEqual({ n: 0 });
   });
 
+  it("keeps exhausted custody cleanup pending without retrying forever", async () => {
+    const h = harness();
+    const { connectionId } = await h.connect();
+    h.failRemoves(5);
+    await h.run(h.connections.revoke("owner", { connectionId }));
+    for (let attempt = 1; attempt < 5; attempt += 1)
+      await h.run(h.connections.sweep());
+    expect(h.connections.cleanupPending()).toBe(1);
+    expect(h.connections.cleanupRetryPending()).toBe(0);
+    await h.run(h.connections.sweep());
+    expect(h.secrets.size).toBe(1);
+    expect(h.removed).toEqual([]);
+  });
+
   it("refuses management by an unauthorized actor", async () => {
     const h = harness();
     await expect(

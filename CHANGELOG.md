@@ -1,5 +1,18 @@
 # @fungi.computer/veil
 
+## 0.6.2
+
+### Patch Changes
+
+- Changes since 0.6.1:
+
+  - fix(veil): keep exhausted credential cleanup pending
+  - fix(oyster): qualify the packed dependency inventory for strangers
+
+- Updated dependencies
+  - @fungi.computer/mycelium@0.3.5
+  - @fungi.computer/forage@0.3.2
+
 ## 0.6.1
 
 ### Patch Changes

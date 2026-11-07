@@ -190,6 +190,7 @@ export function createConnections(options: ConnectionsOptions) {
 
   const {
     cleanupPending,
+    cleanupRetryPending,
     sweep,
     enqueueLocator,
     enqueueCleanup,
@@ -1068,6 +1069,7 @@ export function createConnections(options: ConnectionsOptions) {
     update,
     sweep,
     cleanupPending,
+    cleanupRetryPending,
     reconcilePending,
     awaitingCustody: () => awaitingCustody().length,
   };

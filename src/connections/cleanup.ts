@@ -28,8 +28,11 @@ export function createCleanup(deps: {
   bump: () => void;
 }) {
   const { sql, rows, bump, transactionSync } = deps;
-  /** Sealed credentials still waiting to be deleted; hosts wake their alarm while this is positive. */
+  /** Credentials still waiting to be deleted, including exhausted retries. */
   const cleanupPending = () =>
+    rows(count, "SELECT COUNT(*) AS n FROM veil_connection_cleanup")[0]?.n ?? 0;
+  /** Cleanup jobs eligible for another deletion attempt; hosts wake only for these. */
+  const cleanupRetryPending = () =>
     rows(
       count,
       "SELECT COUNT(*) AS n FROM veil_connection_cleanup WHERE attempts < ?",
@@ -129,6 +132,7 @@ export function createCleanup(deps: {
 
   return {
     cleanupPending,
+    cleanupRetryPending,
     sweep,
     enqueueLocator,
     enqueueCleanup,
