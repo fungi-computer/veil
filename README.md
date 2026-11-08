@@ -1,11 +1,18 @@
 # Veil (`@fungi.computer/veil`)
 
-This package keeps provider credentials behind trusted owner doors. It owns the
+Veil keeps provider credentials away from Agents. A host stores API keys, OAuth
+connections and model keys behind trusted owner doors, and an Agent receives an
+authorized operation, never the provider token or where it lives. It owns the
 shared connections core (MCP, OpenAPI and a repository's git endpoint),
-model-key grants and the Agent's anonymous public-web fetch. A guest receives an
-authorized operation, not the provider token or its private locator.
+model-key grants and the Agent's anonymous public-web fetch.
 
-## Set up and check
+## Install
+
+```sh
+npm install @fungi.computer/veil
+```
+
+## Set up
 
 The host supplies the owner's SQLite, a `CustodyAdapter` and its live
 authorization to `createConnections` (`@fungi.computer/veil/connections`).
@@ -13,10 +20,6 @@ Custody is `sealed` by default; Nango is the optional adapter
 (`@fungi.computer/veil/connections/nango`). Model input cannot choose a
 connection, repository or private locator. Without custody configuration, report
 unavailable rather than manufacturing a connection.
-
-Run `pnpm --filter @fungi.computer/veil test` for the package's synthetic
-custody, signed-webhook and public-fetch checks. A unit test does not prove a
-live Nango service or provider account.
 
 GitHub REST is an ordinary `openapi` connection with an `oauth` credential:
 through an operator-registered provider on either custody adapter, or through a
@@ -216,3 +219,11 @@ only the numeric status. OAuth ports now receive `teamId` as well as the private
 locator; the adapter must verify that the connection belongs to that Team. C7
 must obtain the locator exclusively from the Team-owned Connector record and
 collapse connect-unavailable/timeout into one Agent-facing code.
+
+## Contribute
+
+Run `pnpm --filter @fungi.computer/veil test` for the package's synthetic
+custody, signed-webhook and public-fetch checks. A unit test does not prove a
+live Nango service or provider account.
+
+See [`LICENSE`](LICENSE).
