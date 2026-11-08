@@ -1,5 +1,10 @@
 import { expect, it, vi } from "vitest";
-import { configuredProviderEgress, providerFetch } from "../src/gatekeeper.js";
+import { z } from "zod";
+import {
+  configuredProviderEgress,
+  providerFetch,
+  type KeyedRoute,
+} from "../src/gatekeeper.js";
 
 const OFAC =
   "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML";
@@ -131,24 +136,30 @@ it("refuses a second redirect, every non-302 redirect and direct S3 entry", asyn
   expect(seen).toHaveLength(0);
 });
 
-it("does not allow the pinned redirect for either RPC route", async () => {
+it("does not allow the pinned redirect for a keyed route", async () => {
+  const keyed = {
+    rpc: {
+      urlBinding: "RPC_URL",
+      keyBinding: "RPC_KEY",
+      accepts: (root: URL) => root.href === "https://rpc.example.test/",
+      credential: { in: "query", name: "api-key" },
+      body: z.object({ method: z.literal("read") }),
+    },
+  } satisfies Record<string, KeyedRoute>;
   const env = {
-    SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/",
-    SOLANA_RPC_API_KEY: "synthetic-primary",
-    SOLANA_RPC_FALLBACK_URL: "https://example.solana-mainnet.quiknode.pro/",
-    SOLANA_RPC_FALLBACK_API_KEY: "synthetic-fallback",
+    SANCTIONS_SDN_URL: OFAC,
+    RPC_URL: "https://rpc.example.test/",
+    RPC_KEY: "synthetic-key",
   };
-  for (const route of ["solana-rpc", "solana-rpc-fallback"] as const) {
-    const { fetch, seen } = transport([redirect(DOWNLOAD)]);
-    const egress = configuredProviderEgress(env, { fetch });
-    await expect(
-      egress.fetch(route, egress.baseUrl(route) ?? "", {
-        method: "POST",
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSlot" }),
-      }),
-    ).rejects.toMatchObject({ code: "unavailable" });
-    expect(seen).toHaveLength(1);
-  }
+  const { fetch, seen } = transport([redirect(DOWNLOAD)]);
+  const egress = configuredProviderEgress(env, { fetch, keyed });
+  await expect(
+    egress.fetch("rpc", egress.baseUrl("rpc") ?? "", {
+      method: "POST",
+      body: JSON.stringify({ method: "read" }),
+    }),
+  ).rejects.toMatchObject({ code: "unavailable" });
+  expect(seen).toHaveLength(1);
 });
 
 it("does not restart the caller's deadline across the hop or return abort details", async () => {

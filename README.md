@@ -78,43 +78,37 @@ Workerd's `startTls({ expectedServerHostname })` verifies the certificate
 against that name; it reports a verification failure on the first read, which
 the door types as `unavailable`.
 
-## Platform snapshot egress (private, not enabled by this change)
+## Keyed routes and the sanctions door
 
-`configuredProviderEgress(env)` (from `./gatekeeper`) also owns the platform
-snapshot routes below. Like the existing Hub search caller
-(`apps/hub/src/agent-web-search.ts`, `configuredWebSearch`), a caller obtains
-`baseUrl(route)` and passes credential-free requests through
-`providerFetch(egress, route)`. Veil alone reads the bindings, pins the
-destination and attaches the credential. The new holdings callers are composed
-later; these routes neither mount Hub endpoints nor schedule jobs.
+`configuredProviderEgress(env, { keyed })` also serves routes the host
+registers. A `KeyedRoute` names two Worker bindings, a credential-free HTTPS
+root (`urlBinding`) and a secret (`keyBinding`), plus `accepts(root)` to pin the
+configured root, where the secret travels (`{ in: "query", name }` or
+`{ in: "path" }`), and a Zod `body` schema for the one JSON POST shape the route
+may send. Veil reads both bindings itself, so the host names them and never sees
+their values. A host route may not shadow a Veil route, reuse one binding for
+both, or name one of Veil's own custody bindings; construction refuses it.
 
-| Route                 | Destination / allowed calls                                                                      | Private bindings                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `solana-rpc`          | Helius mainnet, exactly `https://mainnet.helius-rpc.com/`, POST                                  | `SOLANA_RPC_URL` (that credential-free root), `SOLANA_RPC_API_KEY` (Worker secret)                                           |
-| `solana-rpc-fallback` | One configured QuickNode Solana mainnet endpoint, exactly its HTTPS root, POST                   | `SOLANA_RPC_FALLBACK_URL` (`https://<endpoint>.solana-mainnet.quiknode.pro/`), `SOLANA_RPC_FALLBACK_API_KEY` (Worker secret) |
-| `sanctions-screen`    | GET exactly `https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML` | `SANCTIONS_SDN_URL` (that exact URL, opt-in)                                                                                 |
+Like the existing Hub search caller (`apps/hub/src/agent-web-search.ts`,
+`configuredWebSearch`), a caller obtains `baseUrl(route)` and passes
+credential-free requests through `providerFetch(egress, route)`. Requests go to
+exactly the pinned root as single POSTs whose JSON body the host schema accepts;
+caller headers, queries and alternate paths are not forwarded. The
+credential-bearing URL is never returned from `baseUrl`. Missing, invalid or
+unaccepted bindings refuse `unavailable` before fetch; other destinations,
+methods or bodies refuse `denied`. Redirects and non-2xx responses refuse
+`unavailable`; no upstream error body, headers or URL is returned. Successful
+bodies are bounded to 64 MiB and refused on a credential echo (raw, JSON-escaped
+or percent-encoded); request bodies are bounded to 64 KiB. Transport failures,
+including aborts, expose only fixed `VeilError` codes. Keep keys in the existing
+private Worker-secret custody, never Team storage, public config, telemetry or
+logs. The final transport sees the authorized URL and must not log it.
 
-The RPC routes accept only single JSON-RPC 2.0 calls to `getAccountInfo`,
-`getMultipleAccounts`, `getProgramAccounts`, `getTokenSupply` and `getSlot`:
-mint/program-owner boot checks, token and lock account reads, supply and
-finalized-slot reconciliation. Transactions, simulation, airdrops, arbitrary
-methods and batches are refused. The holdings owner still owns finality, params,
-maintained account decoders and reconciliation. QuickNode is the proposal's
-second-provider choice, not an automatic retry: its caller must apply the same
-snapshot checks on fallback.
+Veil also owns one anonymous door:
 
-Helius receives `?api-key=<secret>`; QuickNode receives `/<secret>/`. Neither
-credential-bearing URL is returned from `baseUrl`. Caller headers, queries and
-alternate paths are not forwarded. Keep keys in the existing private
-Worker-secret custody, never Team storage, public config, telemetry or logs. The
-final transport sees the authorized URL and must not log it. Missing/invalid
-bindings refuse `unavailable` before fetch; other destinations or methods refuse
-`denied`. RPC redirects and non-2xx responses refuse `unavailable`; no upstream
-error body, headers or URL is returned. Successful bodies are bounded to 64 MiB
-and refused on a credential echo (raw, JSON-escaped or percent-encoded); RPC
-request bodies are bounded to 64 KiB. Transport failures, including aborts,
-expose only fixed `VeilError` codes. The existing streaming model/search routes
-and model-key rules are unchanged.
+| Route              | Destination / allowed calls                                                                      | Private bindings                             |
+| ------------------ | ------------------------------------------------------------------------------------------------ | -------------------------------------------- |
+| `sanctions-screen` | GET exactly `https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML` | `SANCTIONS_SDN_URL` (that exact URL, opt-in) |
 
 The sanctions GET alone may manually follow **one HTTP 302** from the exact OFAC
 export to
@@ -127,25 +121,14 @@ before the second GET, uses the original abort signal (including any caller
 deadline, never restarted) and keeps the same 64 MiB download bound. Another
 host/path, a missing/invalid Location, a second redirect or any other redirect
 status refuses `unavailable`. Direct entry at S3 and non-GET sanctions requests
-remain refused.
+remain refused. OFAC's public list requires **no credential**, so there is no
+sanctions API key binding. The caller parses the XML and decides what a match
+means; this door only fetches the published list.
 
-**Sanctions choice:** use the official OFAC SDN XML list, not the Chainalysis
-free API. Read-only confirmation on 2026-10-31 found actual
-`Digital Currency Address - SOL` identifiers in the official export (including
-ID 194579), establishing Solana-address coverage without assuming a vendor's
-chain support. OFAC's public list requires **no credential**, so there is no
-`SANCTIONS_API_KEY` binding or invented anonymous-key fallback. F5 must parse
-the XML through a maintained decoder, match the SOL identifiers, and fail closed
-on an unavailable or unusable list; this door does not claim to screen persons,
-countries or unlisted addresses.
-
-Provider contract sources:
-[Helius RPC](https://www.helius.dev/docs/rpc/overview),
-[QuickNode endpoints](https://www.quicknode.com/docs/solana/endpoints),
+Provider contract source:
 [OFAC data formats](https://ofac.treasury.gov/specially-designated-nationals-list-data-formats-data-schemas)
 and the exact official export above. Unit fixtures prove custody and route
-policy, not provisioned keys, paid-plan large-snapshot support, live RPC
-reconciliation or live screening; F4/F5 own those opt-in proofs.
+policy, not provisioned keys or live upstreams.
 
 ## Model credentials and failure handling
 

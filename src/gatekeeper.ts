@@ -31,6 +31,8 @@ import { VeilError } from "./index.js";
 import {
   createProviderEgress,
   providerFetch,
+  type KeyedRoute,
+  type KeyedRoutes,
   type ProviderEgress,
   type ProviderKeyBindings,
   type ProviderRoute,
@@ -53,7 +55,7 @@ import * as Exit from "effect/Exit";
  */
 
 export { providerFetch };
-export type { ProviderEgress, ProviderRoute };
+export type { KeyedRoute, KeyedRoutes, ProviderEgress, ProviderRoute };
 export type { ConnectionsCustodian };
 
 /** Private Worker bindings, never Team storage or public response fields. */
@@ -223,13 +225,17 @@ export function configuredGitHubAppCustody(
 /**
  * `veil.fetch` for platform provider keys. The Hub names a route and sends a
  * credential-free request; Veil checks the destination and attaches the key.
- * `fetch` is only the final transport (telemetry, or a test double).
+ * `fetch` is only the final transport (telemetry, or a test double); `keyed`
+ * registers the host's own keyed routes by the bindings they read.
  */
-export function configuredProviderEgress(
+export function configuredProviderEgress<const K extends string = never>(
   env: VeilBindings,
-  options: Readonly<{ fetch?: typeof globalThis.fetch }> = {},
-): ProviderEgress {
-  return createProviderEgress(env, options);
+  options: Readonly<{
+    fetch?: typeof globalThis.fetch;
+    keyed?: Readonly<Record<K, KeyedRoute>>;
+  }> = {},
+): ProviderEgress<K> {
+  return createProviderEgress<K>(env, options);
 }
 
 /** The Worker secret is the only custody root for per-trigger signing bytes. */

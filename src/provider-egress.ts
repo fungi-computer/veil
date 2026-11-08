@@ -17,9 +17,13 @@ import { VeilError } from "./index.js";
  *   `/parallel` route, with `x-api-key`.
  * - `ai-gateway-logs`: Cloudflare's API log read used for usage
  *   reconciliation, `Authorization: Bearer` with the gateway token.
- * - `solana-rpc` / `solana-rpc-fallback`: finalized snapshot reads through
- *   Helius / QuickNode, with private query / path credentials.
  * - `sanctions-screen`: the official OFAC SDN XML export, without a key.
+ *
+ * A host may also register keyed routes (`KeyedRoute`): a pinned
+ * credential-free HTTPS root and a secret, each read here from a Worker
+ * binding the host names, for one host-decoded JSON POST shape. Veil owns the
+ * custody (pinning, credential placement, bounds, redirects, echo refusal);
+ * the host owns which provider and which calls.
  */
 
 /** Private Worker bindings read only here; never Team storage or responses. */
@@ -31,66 +35,109 @@ export type ProviderKeyBindings = Readonly<{
   /** Cloudflare account that owns the gateway; routes are scoped to it. */
   AI_GATEWAY_ACCOUNT_ID?: string;
   AI_GATEWAY_ID?: string;
-  /** Credential-free Helius mainnet root; the key is a separate Worker secret. */
-  SOLANA_RPC_URL?: string;
-  SOLANA_RPC_API_KEY?: string;
-  /** Credential-free QuickNode Solana mainnet root; token is a Worker secret. */
-  SOLANA_RPC_FALLBACK_URL?: string;
-  SOLANA_RPC_FALLBACK_API_KEY?: string;
   /** Opt-in to the pinned public OFAC SDN XML export. No API key is needed. */
   SANCTIONS_SDN_URL?: string;
 }>;
 
 export type ProviderRoute =
-  | "camel"
-  | "ai-gateway"
-  | "parallel"
-  | "ai-gateway-logs"
-  | "solana-rpc"
-  | "solana-rpc-fallback"
-  | "sanctions-screen";
+  "camel" | "ai-gateway" | "parallel" | "ai-gateway-logs" | "sanctions-screen";
 
 const CAMEL_BASE = "https://stream.camelai.com/v1";
 const PARALLEL_BASE = "https://api.parallel.ai";
 const GATEWAY_ORIGIN = "https://gateway.ai.cloudflare.com";
 const CLOUDFLARE_API_ORIGIN = "https://api.cloudflare.com";
-const HELIUS_BASE = "https://mainnet.helius-rpc.com/";
 const OFAC_SDN =
   "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML";
 const OFAC_DOWNLOAD_ORIGIN =
   "https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com";
 
-type Target = Readonly<{ base: URL; credential?: string }>;
+/**
+ * A host-registered POST route. Veil reads both bindings itself; the host
+ * names them and never sees their values. The configured root must be a bare
+ * `https://<host>/` that `accepts` pins; requests go to exactly that root.
+ */
+export type KeyedRoute = Readonly<{
+  /** Binding holding the credential-free root, e.g. `https://rpc.example/`. */
+  urlBinding: string;
+  /** Binding holding the secret; it must not be one of Veil's own bindings. */
+  keyBinding: string;
+  /** Whether a configured root is this route's pinned destination. */
+  accepts: (root: URL) => boolean;
+  /** Where the secret travels: a query parameter or the sole path segment. */
+  credential:
+    Readonly<{ in: "query"; name: string }> | Readonly<{ in: "path" }>;
+  /** Host-owned decoding of the one JSON body this route may send. */
+  body: z.ZodType;
+}>;
+export type KeyedRoutes = Readonly<Record<string, KeyedRoute>>;
 
-// Single read-only JSON-RPC calls used by the finalized holdings/lock reader.
-// Zod owns JSON envelope decoding; the holdings owner owns params and results.
-const snapshotCall = z
-  .object({
-    jsonrpc: z.literal("2.0"),
-    id: z.union([z.string(), z.number()]),
-    method: z.enum([
-      "getAccountInfo",
-      "getMultipleAccounts",
-      "getProgramAccounts",
-      "getTokenSupply",
-      "getSlot",
-    ]),
-    params: z.array(z.unknown()).optional(),
-  })
-  .strict();
+type Target = Readonly<{
+  base: URL;
+  credential?: string;
+  keyed?: KeyedRoute;
+}>;
 
-function snapshotRoute(route: ProviderRoute): boolean {
-  return (
-    route === "solana-rpc" ||
-    route === "solana-rpc-fallback" ||
-    route === "sanctions-screen"
-  );
-}
+/** Veil's own custody roots; a host route may never borrow one of them. */
+const VEIL_OWNED_BINDINGS: ReadonlySet<string> = new Set([
+  "CAMEL_API_KEY",
+  "AI_GATEWAY_AUTH_TOKEN",
+  "PARALLEL_API_KEY",
+  "AI_GATEWAY_ACCOUNT_ID",
+  "AI_GATEWAY_ID",
+  "SANCTIONS_SDN_URL",
+  "WEBHOOK_TRIGGER_MASTER_KEY",
+  "OPENAPI_CREDENTIAL_MASTER_KEY",
+  "OPENAPI_CREDENTIAL_KEY_ID",
+  "NANGO_SERVER_URL",
+  "NANGO_API_KEY",
+  "NANGO_WEBHOOK_SIGNING_KEY",
+]);
 
 const present = (value: string | undefined): string | undefined => {
   const trimmed = value?.trim();
   return trimmed === undefined || trimmed === "" ? undefined : trimmed;
 };
+
+/** A registered keyed route with the decoder for its two host-named bindings. */
+type RegisteredRoute = Readonly<{
+  route: KeyedRoute;
+  bindings: z.ZodType<Readonly<{ root: string; credential: string }>>;
+}>;
+
+/** Zod reads exactly the two host-named bindings; nothing else in `env`. */
+function bindingsDecoder(route: KeyedRoute): RegisteredRoute["bindings"] {
+  const value = z.string().trim().min(1);
+  return z
+    .object({ [route.urlBinding]: value, [route.keyBinding]: value })
+    .transform((read) => ({
+      root: read[route.urlBinding] ?? "",
+      credential: read[route.keyBinding] ?? "",
+    }));
+}
+
+/** A keyed route's pinned root and secret; `undefined` if either is unusable. */
+function keyedTarget(
+  env: ProviderKeyBindings,
+  registered: RegisteredRoute,
+): Target | undefined {
+  const read = registered.bindings.safeParse(env);
+  if (!read.success) return undefined;
+  const { root, credential } = read.data;
+  if (!URL.canParse(root)) return undefined;
+  const base = new URL(root);
+  if (
+    base.protocol !== "https:" ||
+    base.username ||
+    base.password ||
+    base.port ||
+    base.pathname !== "/" ||
+    base.search ||
+    base.hash ||
+    !registered.route.accepts(base)
+  )
+    return undefined;
+  return { base, credential, keyed: registered.route };
+}
 
 /** The one AI Gateway origin-and-path scope, or `undefined` when unnamed. */
 function gatewayScope(env: ProviderKeyBindings): string | undefined {
@@ -106,36 +153,6 @@ function target(
   route: ProviderRoute,
 ): Target | undefined {
   switch (route) {
-    case "solana-rpc":
-    case "solana-rpc-fallback": {
-      const primary = route === "solana-rpc";
-      const raw = present(
-        primary ? env.SOLANA_RPC_URL : env.SOLANA_RPC_FALLBACK_URL,
-      );
-      const credential = present(
-        primary ? env.SOLANA_RPC_API_KEY : env.SOLANA_RPC_FALLBACK_API_KEY,
-      );
-      if (raw === undefined || credential === undefined) return undefined;
-      if (!URL.canParse(raw)) return undefined;
-      const base = new URL(raw);
-      if (
-        base.protocol !== "https:" ||
-        base.username ||
-        base.password ||
-        base.port ||
-        base.pathname !== "/" ||
-        base.search ||
-        base.hash
-      )
-        return undefined;
-      if (
-        primary
-          ? base.href !== HELIUS_BASE
-          : !/^[a-z0-9-]+\.solana-mainnet\.quiknode\.pro$/u.test(base.hostname)
-      )
-        return undefined;
-      return { base, credential };
-    }
     case "sanctions-screen":
       return present(env.SANCTIONS_SDN_URL) === OFAC_SDN
         ? { base: new URL(OFAC_SDN) }
@@ -205,10 +222,8 @@ function authorize(
   ])
     headers.delete(name);
   switch (route) {
-    case "solana-rpc":
-    case "solana-rpc-fallback":
     case "sanctions-screen":
-      // These doors construct their own headers and URL below.
+      // This door constructs its own headers and URL below.
       return;
     case "camel":
     case "ai-gateway-logs":
@@ -252,9 +267,8 @@ async function boundedText(
   }
 }
 
-/** Fixed, non-streaming snapshot doors never return upstream headers or URLs. */
-async function fetchSnapshot(
-  route: ProviderRoute,
+/** Fixed, non-streaming doors never return upstream headers or URLs. */
+async function fetchFixed(
   resolved: Target,
   request: Request,
   transport: typeof globalThis.fetch,
@@ -262,7 +276,8 @@ async function fetchSnapshot(
   try {
     const url = new URL(request.url);
     if (url.href !== resolved.base.href) throw new VeilError("denied");
-    const screening = route === "sanctions-screen";
+    const keyed = resolved.keyed;
+    const screening = keyed === undefined;
     if (request.method !== (screening ? "GET" : "POST"))
       throw new VeilError("denied");
     let body: string | undefined;
@@ -274,14 +289,15 @@ async function fetchSnapshot(
       } catch {
         throw new VeilError("denied");
       }
-      if (!snapshotCall.safeParse(envelope).success)
+      if (!keyed.body.safeParse(envelope).success)
         throw new VeilError("denied");
     }
     const destination = new URL(resolved.base);
     const key = resolved.credential;
     if (!screening) {
       if (key === undefined) throw new VeilError("unavailable");
-      if (route === "solana-rpc") destination.searchParams.set("api-key", key);
+      if (keyed.credential.in === "query")
+        destination.searchParams.set(keyed.credential.name, key);
       else destination.pathname = `/${encodeURIComponent(key)}/`;
     }
     const init: RequestInit = {
@@ -353,22 +369,59 @@ async function fetchSnapshot(
   }
 }
 
+const PROVIDER_ROUTES: ReadonlySet<string> = new Set<ProviderRoute>([
+  "camel",
+  "ai-gateway",
+  "parallel",
+  "ai-gateway-logs",
+  "sanctions-screen",
+]);
+const isProviderRoute = (route: string): route is ProviderRoute =>
+  PROVIDER_ROUTES.has(route);
+
+/** Host keyed routes, refused when they shadow a Veil route or custody root. */
+function keyedRegistry(
+  routes: KeyedRoutes,
+): ReadonlyMap<string, RegisteredRoute> {
+  const registry = new Map<string, RegisteredRoute>();
+  for (const [name, route] of Object.entries(routes)) {
+    if (
+      isProviderRoute(name) ||
+      route.urlBinding === route.keyBinding ||
+      VEIL_OWNED_BINDINGS.has(route.urlBinding) ||
+      VEIL_OWNED_BINDINGS.has(route.keyBinding)
+    )
+      throw new VeilError("invalid_input");
+    registry.set(name, { route, bindings: bindingsDecoder(route) });
+  }
+  return registry;
+}
+
 /**
  * The provider-key door. `fetch` is the transport the authorized request is
- * finally sent on (a test double, or the Hub's telemetry-wrapped fetch).
+ * finally sent on (a test double, or the Hub's telemetry-wrapped fetch);
+ * `keyed` names the host's own keyed routes.
  */
-export function createProviderEgress(
+export function createProviderEgress<const K extends string = never>(
   env: ProviderKeyBindings,
-  options: Readonly<{ fetch?: typeof globalThis.fetch }> = {},
+  options: Readonly<{
+    fetch?: typeof globalThis.fetch;
+    keyed?: Readonly<Record<K, KeyedRoute>>;
+  }> = {},
 ) {
   const transport: typeof globalThis.fetch =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const keyed = keyedRegistry(options.keyed ?? {});
+  const resolve = (route: ProviderRoute | K): Target | undefined => {
+    if (isProviderRoute(route)) return target(env, route);
+    const registered = keyed.get(route);
+    return registered === undefined ? undefined : keyedTarget(env, registered);
+  };
   return {
     /** Whether required custody/configuration is present; reveals no value. */
-    credentialed(route: ProviderRoute): boolean {
+    credentialed(route: ProviderRoute | K): boolean {
+      if (!isProviderRoute(route)) return resolve(route) !== undefined;
       switch (route) {
-        case "solana-rpc":
-        case "solana-rpc-fallback":
         case "sanctions-screen":
           return target(env, route) !== undefined;
         case "camel":
@@ -381,8 +434,8 @@ export function createProviderEgress(
       }
     },
     /** The route's public base URL, or `null` while it is not configured. */
-    baseUrl(route: ProviderRoute): string | null {
-      const resolved = target(env, route);
+    baseUrl(route: ProviderRoute | K): string | null {
+      const resolved = resolve(route);
       return resolved === undefined
         ? null
         : resolved.base.href.replace(/\/+$/u, "");
@@ -395,11 +448,11 @@ export function createProviderEgress(
      * sanctions GET may follow one pinned OFAC government-S3 302.
      */
     async fetch(
-      route: ProviderRoute,
+      route: ProviderRoute | K,
       input: string | URL | Request,
       init?: RequestInit,
     ): Promise<Response> {
-      const resolved = target(env, route);
+      const resolved = resolve(route);
       if (resolved === undefined) throw new VeilError("unavailable");
       let request: Request;
       try {
@@ -410,8 +463,8 @@ export function createProviderEgress(
       }
       if (!within(new URL(request.url), resolved.base))
         throw new VeilError("denied");
-      if (snapshotRoute(route))
-        return fetchSnapshot(route, resolved, request, transport);
+      if (!isProviderRoute(route) || route === "sanctions-screen")
+        return fetchFixed(resolved, request, transport);
       const headers = new Headers(request.headers);
       authorize(route, headers, resolved.credential);
       try {
@@ -427,12 +480,14 @@ export function createProviderEgress(
     },
   };
 }
-export type ProviderEgress = ReturnType<typeof createProviderEgress>;
+export type ProviderEgress<K extends string = never> = ReturnType<
+  typeof createProviderEgress<K>
+>;
 
 /** A `fetch` bound to one route, for consumers that take a plain fetch. */
-export function providerFetch(
-  egress: ProviderEgress,
-  route: ProviderRoute,
+export function providerFetch<K extends string = never>(
+  egress: ProviderEgress<K>,
+  route: ProviderRoute | K,
 ): typeof globalThis.fetch {
   return (input, init) => egress.fetch(route, input, init);
 }
