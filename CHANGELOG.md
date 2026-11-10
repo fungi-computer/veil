@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.6.6
+
+### Patch Changes
+
+- Changes since 0.6.5:
+
+  - fix(oyster): connect Cloudflare model keys from Settings
+
 ## 0.6.5
 
 ### Patch Changes

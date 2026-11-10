@@ -129,7 +129,10 @@ const forwardedHeaders = [
 ] as const;
 
 /** The exact supplier target, confined below the sealed key's base URL. */
-export function modelKeyTarget(access: ModelKeyAccess, request: Request): URL {
+export function modelKeyTarget(
+  access: Pick<ModelKeyAccess, "baseUrl">,
+  request: Request,
+): URL {
   const base = new URL(`${access.baseUrl}/`);
   let target: URL;
   try {
