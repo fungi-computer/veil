@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.7.0
+
+### Minor Changes
+
+- Changes since 0.6.6:
+
+  - feat(model-keys): connect every API-key provider Pi ships from one list
+
 ## 0.6.6
 
 ### Patch Changes

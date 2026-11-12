@@ -14,15 +14,114 @@ export function isModelKeyProvider(value: string): value is ModelKeyProvider {
   return modelKeyProviders.some((provider) => provider === value);
 }
 
-/** The supplier base each provider's Pi client targets. */
-const providerBaseUrls = {
-  anthropic: "https://api.anthropic.com",
-  openai: "https://api.openai.com/v1",
-  openrouter: "https://openrouter.ai/api/v1",
-} as const satisfies Record<
-  Exclude<ModelKeyProvider, "openai-compatible">,
-  string
+/**
+ * Every provider whose Pi catalog runs with one plain API key against one
+ * supplier base: its label, base URL, how the key is presented and the cheap
+ * authenticated read that proves it. This is the single list; hosts add only
+ * what they alone own (a Nango integration, a Pi catalog loader).
+ */
+export const catalogModelKeyProviders = {
+  anthropic: {
+    label: "Anthropic",
+    baseUrl: "https://api.anthropic.com",
+    auth: "x-api-key",
+    probe: "/v1/models?limit=1",
+  },
+  openai: {
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    auth: "bearer",
+    probe: "/models",
+  },
+  openrouter: {
+    label: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    auth: "bearer",
+    probe: "/key",
+  },
+  google: {
+    label: "Google Gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    auth: "x-goog-api-key",
+    probe: "/models?pageSize=1",
+  },
+  xai: {
+    label: "xAI",
+    baseUrl: "https://api.x.ai/v1",
+    auth: "bearer",
+    probe: "/models",
+  },
+  groq: {
+    label: "Groq",
+    baseUrl: "https://api.groq.com/openai/v1",
+    auth: "bearer",
+    probe: "/models",
+  },
+  mistral: {
+    label: "Mistral",
+    baseUrl: "https://api.mistral.ai",
+    auth: "bearer",
+    probe: "/v1/models",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    auth: "bearer",
+    probe: "/models",
+  },
+  cerebras: {
+    label: "Cerebras",
+    baseUrl: "https://api.cerebras.ai/v1",
+    auth: "bearer",
+    probe: "/models",
+  },
+  together: {
+    label: "Together AI",
+    baseUrl: "https://api.together.ai/v1",
+    auth: "bearer",
+    probe: "/models",
+  },
+  moonshotai: {
+    label: "Moonshot AI",
+    baseUrl: "https://api.moonshot.ai/v1",
+    auth: "bearer",
+    probe: "/models",
+  },
+} as const satisfies Readonly<
+  Record<
+    string,
+    Readonly<{
+      label: string;
+      baseUrl: string;
+      auth: "bearer" | "x-api-key" | "x-goog-api-key";
+      probe: string;
+    }>
+  >
 >;
+export type CatalogModelKeyProvider = keyof typeof catalogModelKeyProviders;
+export const catalogModelKeyProviderIds = Object.freeze(
+  // Object.keys widens to string; the table's own keys are the union.
+  Object.keys(catalogModelKeyProviders).filter(isCatalogModelKeyProvider),
+);
+
+export function isCatalogModelKeyProvider(
+  value: string,
+): value is CatalogModelKeyProvider {
+  return Object.hasOwn(catalogModelKeyProviders, value);
+}
+
+/** The request header that carries a catalog provider's key. */
+export function modelKeyAuthenticated(
+  provider: CatalogModelKeyProvider,
+  headers: Headers,
+  apiKey: string,
+): Headers {
+  const next = new Headers(headers);
+  const { auth } = catalogModelKeyProviders[provider];
+  if (auth === "bearer") next.set("authorization", `Bearer ${apiKey}`);
+  else next.set(auth, apiKey);
+  return next;
+}
 
 /**
  * Canonical base URL for a sealed key. Only an OpenAI-compatible key names its
@@ -31,14 +130,14 @@ const providerBaseUrls = {
  * Resolution is checked separately with `assertPublicResolution`.
  */
 export function modelKeyBaseUrl(
-  provider: ModelKeyProvider,
+  provider: ModelKeyProvider | CatalogModelKeyProvider,
   configured?: string | null,
   options: Readonly<{ allowLocalDev?: boolean }> = {},
 ): string {
   if (provider !== "openai-compatible") {
     if (configured !== undefined && configured !== null)
       throw new VeilError("invalid_input");
-    return providerBaseUrls[provider];
+    return catalogModelKeyProviders[provider].baseUrl;
   }
   let url: URL;
   try {
@@ -165,18 +264,24 @@ export function modelKeyForwardedHeaders(request: Request): Headers {
 
 /** A cheap authenticated read that proves a key works without spending tokens. */
 export function modelKeyValidationRequest(
-  access: Pick<ModelKeyAccess, "provider" | "baseUrl">,
+  access: Readonly<{
+    provider: CatalogModelKeyProvider | "openai-compatible";
+    baseUrl: string;
+  }>,
   signal: AbortSignal,
 ): Request {
-  const path = access.provider === "openrouter" ? "/key" : "/models";
-  const url =
-    access.provider === "anthropic"
-      ? `${access.baseUrl}/v1/models?limit=1`
-      : `${access.baseUrl}${path}`;
   const headers = new Headers({ accept: "application/json" });
   if (access.provider === "anthropic")
     headers.set("anthropic-version", "2023-06-01");
-  return new Request(url, { method: "GET", headers, signal });
+  const probe =
+    access.provider === "openai-compatible"
+      ? "/models"
+      : catalogModelKeyProviders[access.provider].probe;
+  return new Request(`${access.baseUrl}${probe}`, {
+    method: "GET",
+    headers,
+    signal,
+  });
 }
 
 /** Read a validation response: only an auth refusal says the key itself is bad. */
