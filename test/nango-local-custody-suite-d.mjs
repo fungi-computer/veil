@@ -29,6 +29,8 @@ const PINNED_DIGEST =
 
 const run = randomUUID().slice(0, 8);
 const pgName = `veil-suite-d-pg-${run}`;
+const restorePgName = `veil-suite-d-pg-restore-${run}`;
+const restoreNangoName = `veil-suite-d-nango-restore-${run}`;
 const nangoName = `veil-suite-d-nango-${run}`;
 const integrationKey = `veil-suite-d-${run}`;
 const connectionLocator = `suite-d-${run}`;
@@ -63,6 +65,207 @@ async function waitFor(check, { timeoutMs = 30_000, intervalMs = 500 } = {}) {
   }
 }
 
+/** Starts one disposable Nango container against one disposable Postgres. The
+ * restore rehearsal reuses it with the original key and a restored database. */
+function startNango(name, pgIp, pgPassword, encryptionKey) {
+  docker([
+    "run",
+    "-d",
+    "--name",
+    name,
+    "-p",
+    "127.0.0.1:0:8080",
+    "-e",
+    `NANGO_DB_HOST=${pgIp}`,
+    "-e",
+    "NANGO_DB_PORT=5432",
+    "-e",
+    "NANGO_DB_USER=nango",
+    "-e",
+    `NANGO_DB_PASSWORD=${pgPassword}`,
+    "-e",
+    "NANGO_DB_NAME=nango",
+    "-e",
+    `NANGO_ENCRYPTION_KEY=${encryptionKey}`,
+    "-e",
+    "SERVER_PORT=8080",
+    "-e",
+    "NANGO_SERVER_PORT=8080",
+    "-e",
+    "NANGO_LOGS_ENABLED=false",
+    "-e",
+    "NANGO_TELEMETRY=false",
+    // Isolated test-only egress posture: this disposable instance's proxy is
+    // allowed to reach the private test upstream. The denylist override is
+    // emptied for THIS container only; production Nango is never touched.
+    "-e",
+    "NANGO_PROXY_BASE_URL_OVERRIDE_ENABLED=true",
+    "-e",
+    "NANGO_PROXY_BASE_URL_OVERRIDE_DENYLIST=[]",
+    "-e",
+    'NANGO_OUTBOUND_URL_POLICY={"blockPrivateIps":false}',
+    IMAGE,
+  ]);
+  const hostPort = docker([
+    "inspect",
+    "-f",
+    '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}',
+    name,
+  ]);
+  return `http://127.0.0.1:${hostPort}`;
+}
+
+async function waitForNangoHealth(serverUrl) {
+  await waitFor(async () => {
+    try {
+      const response = await fetch(`${serverUrl}/health`);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  });
+}
+
+async function waitForPostgres(name) {
+  await waitFor(() => {
+    try {
+      docker(["exec", name, "pg_isready", "-U", "nango"]);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function containerIp(name) {
+  return docker([
+    "inspect",
+    "-f",
+    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+    name,
+  ]);
+}
+
+function startPostgres(name, pgPassword) {
+  docker([
+    "run",
+    "-d",
+    "--name",
+    name,
+    "-e",
+    "POSTGRES_DB=nango",
+    "-e",
+    "POSTGRES_USER=nango",
+    "-e",
+    `POSTGRES_PASSWORD=${pgPassword}`,
+    "postgres:16-alpine",
+  ]);
+}
+
+function removeQuietly(name, operation) {
+  try {
+    docker(["rm", "-f", name]);
+  } catch (cause) {
+    cleanupFailures.push({ operation, cause });
+  }
+}
+
+/** Backup and key-restore rehearsal. Dumps the live store as plain SQL (so a
+ * canary scan is meaningful; a compressed dump would hide plaintext), restores
+ * it into a fresh Postgres, starts a fresh Nango with the ORIGINAL key, and
+ * proves the sealed connection decrypts and injects the same secret. Returns
+ * the backup text so the caller can scan it. */
+async function rehearseBackupRestore({
+  pgPassword,
+  encryptionKey,
+  devKey,
+  access,
+  baseUrl,
+  observations,
+}) {
+  const backup = execFileSync(
+    "docker",
+    ["exec", pgName, "pg_dump", "-U", "nango", "-d", "nango", "--format=plain"],
+    { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 },
+  );
+  assert.ok(
+    backup.includes(connectionLocator),
+    "the backup must contain the sealed connection row, or the canary scan proves nothing",
+  );
+  assert.ok(
+    !backup.includes(syntheticApiKey),
+    "the backup must hold the credential only encrypted",
+  );
+  console.log(JSON.stringify({ stage: "backup-taken", bytes: backup.length }));
+
+  startPostgres(restorePgName, pgPassword);
+  await waitForPostgres(restorePgName);
+  // Restore runs against a database that Nango has never seen.
+  execFileSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      restorePgName,
+      "psql",
+      "-U",
+      "nango",
+      "-d",
+      "nango",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-q",
+    ],
+    { input: backup, encoding: "utf8", maxBuffer: 512 * 1024 * 1024 },
+  );
+  const restoreUrl = startNango(
+    restoreNangoName,
+    containerIp(restorePgName),
+    pgPassword,
+    encryptionKey,
+  );
+  try {
+    await waitForNangoHealth(restoreUrl);
+    const restoredCustodian = createNangoModelKeyCustodian({
+      serverUrl: restoreUrl,
+      apiKey: devKey,
+      integrations: { "openai-compatible": integrationKey },
+    });
+    const before = observations.length;
+    const restored = await restoredCustodian.send(
+      access,
+      new Request(`${baseUrl}/v1/models`, { method: "GET" }),
+    );
+    assert.equal(restored.status, 200);
+    await restored.text();
+    assert.equal(observations.length, before + 1);
+    assert.equal(
+      observations[before].authorization,
+      `Bearer ${syntheticApiKey}`,
+      "the restored store with the original key must decrypt to the same secret",
+    );
+    console.log(
+      JSON.stringify({
+        stage: "restore-decrypts-same-secret",
+        restoredSecretMatches: true,
+      }),
+    );
+  } finally {
+    try {
+      assertNoLeak(
+        "restored-nango-container-logs",
+        dockerLogsSince(restoreNangoName, "0"),
+      );
+    } catch (cause) {
+      cleanupFailures.push({
+        operation: "read restored Nango container logs",
+        cause,
+      });
+    }
+  }
+  return backup;
+}
+
 // One linear, step-by-step container orchestration script (low cyclomatic/
 // cognitive complexity; the line count is sequential setup/teardown, not
 // branching); splitting it would only thread the same handful of local
@@ -92,94 +295,16 @@ async function main() {
     }),
   );
 
-  docker([
-    "run",
-    "-d",
-    "--name",
-    pgName,
-    "-e",
-    "POSTGRES_DB=nango",
-    "-e",
-    "POSTGRES_USER=nango",
-    "-e",
-    `POSTGRES_PASSWORD=${pgPassword}`,
-    "postgres:16-alpine",
-  ]);
+  startPostgres(pgName, pgPassword);
 
   try {
-    await waitFor(() => {
-      try {
-        docker(["exec", pgName, "pg_isready", "-U", "nango"]);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    await waitForPostgres(pgName);
+    const pgIp = containerIp(pgName);
 
-    const pgIp = docker([
-      "inspect",
-      "-f",
-      "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-      pgName,
-    ]);
-
-    docker([
-      "run",
-      "-d",
-      "--name",
-      nangoName,
-      "-p",
-      "127.0.0.1:0:8080",
-      "-e",
-      `NANGO_DB_HOST=${pgIp}`,
-      "-e",
-      "NANGO_DB_PORT=5432",
-      "-e",
-      "NANGO_DB_USER=nango",
-      "-e",
-      `NANGO_DB_PASSWORD=${pgPassword}`,
-      "-e",
-      "NANGO_DB_NAME=nango",
-      "-e",
-      `NANGO_ENCRYPTION_KEY=${encryptionKey}`,
-      "-e",
-      "SERVER_PORT=8080",
-      "-e",
-      "NANGO_SERVER_PORT=8080",
-      "-e",
-      "NANGO_LOGS_ENABLED=false",
-      "-e",
-      "NANGO_TELEMETRY=false",
-      // Isolated test-only egress posture: this disposable instance's proxy
-      // is allowed to reach the private test upstream below. The denylist
-      // override is emptied for THIS container only; production Nango is
-      // never touched or reconfigured by this script.
-      "-e",
-      "NANGO_PROXY_BASE_URL_OVERRIDE_ENABLED=true",
-      "-e",
-      "NANGO_PROXY_BASE_URL_OVERRIDE_DENYLIST=[]",
-      "-e",
-      'NANGO_OUTBOUND_URL_POLICY={"blockPrivateIps":false}',
-      IMAGE,
-    ]);
+    const serverUrl = startNango(nangoName, pgIp, pgPassword, encryptionKey);
 
     try {
-      const hostPort = docker([
-        "inspect",
-        "-f",
-        '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}',
-        nangoName,
-      ]);
-      const serverUrl = `http://127.0.0.1:${hostPort}`;
-
-      await waitFor(async () => {
-        try {
-          const response = await fetch(`${serverUrl}/health`);
-          return response.ok;
-        } catch {
-          return false;
-        }
-      });
+      await waitForNangoHealth(serverUrl);
       console.log(JSON.stringify({ stage: "nango-healthy", serverUrl }));
 
       const devKey = docker([
@@ -283,6 +408,19 @@ async function main() {
           }),
         );
 
+        // 2b. backup + key restore into a fresh isolated instance, then a
+        // canary scan of the backup by value.
+        const backup = await rehearseBackupRestore({
+          pgPassword,
+          encryptionKey,
+          devKey,
+          access,
+          baseUrl,
+          observations,
+        });
+        assertNoLeak("postgres-backup", backup);
+        const requestsBeforeDisconnect = observations.length;
+
         // 3. disconnect denies later reads before provider egress.
         const removed = await custodian.remove(
           { locator: connectionLocator, provider: "openai-compatible" },
@@ -297,7 +435,7 @@ async function main() {
         await afterDisconnect.text();
         assert.equal(
           observations.length,
-          1,
+          requestsBeforeDisconnect,
           "no second upstream request after disconnect: denial happens before egress",
         );
         console.log(JSON.stringify({ stage: "disconnect-denies-read" }));
@@ -336,19 +474,13 @@ async function main() {
       } catch (cause) {
         cleanupFailures.push({ operation: "read Nango container logs", cause });
       } finally {
-        try {
-          docker(["rm", "-f", nangoName]);
-        } catch (cause) {
-          cleanupFailures.push({ operation: "remove Nango container", cause });
-        }
+        removeQuietly(restoreNangoName, "remove restored Nango container");
+        removeQuietly(nangoName, "remove Nango container");
       }
     }
   } finally {
-    try {
-      docker(["rm", "-f", pgName]);
-    } catch (cause) {
-      cleanupFailures.push({ operation: "remove Postgres container", cause });
-    }
+    removeQuietly(restorePgName, "remove restore Postgres container");
+    removeQuietly(pgName, "remove Postgres container");
   }
 }
 
@@ -377,7 +509,8 @@ console.log(
     run,
     scope:
       "Real isolated local Nango (pinned self-hosted image) + real createNangoModelKeyCustodian: " +
-      "connect, final-egress credential injection, disconnect-denies-read, unavailable-after-stop. " +
+      "connect, final-egress credential injection, backup + original-key restore into a fresh instance " +
+      "(secret decrypts and matches; canary absent from backup and logs), disconnect-denies-read, unavailable-after-stop. " +
       "Not GitHub OAuth refresh/reconnect-required (needs a real GitHub App; excluded per ticket 05), " +
       "not Discord/Etsy/hosted BYOK, not production Nango.",
   }),
