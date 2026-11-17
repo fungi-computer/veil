@@ -51,11 +51,13 @@ fake custody.
 `inject` sends through Nango's proxy, which attaches and refreshes the
 credential; the pinned deletion endpoint returns `200 {success:true}` after
 deletion and `400 {error:{code:"unknown_connection"}}` when the connection is
-absent, and only those settle cleanup. A proxy `404` is the custodian no longer
-holding the connection and marks it reconnect-required. `find` asks Nango for
-the one connection that carries an attempt's state, actor and Team, so a sign-in
-whose signed completion was lost still settles. Cancellation stops the caller
-waiting; it does not prove upstream work stopped or rolled back.
+absent, and only those settle cleanup. The adapter maps a proxy `404` to
+reconnect-required. The pinned server instead returns an ambiguous `400`
+`server_error` when a connection is missing; that failed HTTP response does not
+establish terminal credential invalidity. `find` asks Nango for the one
+connection that carries an attempt's state, actor and Team, so a sign-in whose
+signed completion was lost still settles. Cancellation stops the caller waiting;
+it does not prove upstream work stopped or rolled back.
 
 `configuredComputerGitIntegration(env)` names the integration through which a
 Computer's git signs in (`NANGO_GITHUB_APP_INTEGRATION_ID`);
@@ -220,10 +222,48 @@ locator; the adapter must verify that the connection belongs to that Team. C7
 must obtain the locator exclusively from the Team-owned Connector record and
 collapse connect-unavailable/timeout into one Agent-facing code.
 
+## Vault and existing custody
+
+Veil's existing `credential-store` and Connections core are the custody
+foundation for the
+[accepted Vault decision](../../wiki/3-resources/decisions/adr-vault-v1.md).
+Today `createSealedCustody` places a Connection credential inside the store's
+`withSecret` callback at final send; the host supplies live authorization. This
+is not a generic secret-read API for Agents.
+
+The Vault decision is not an implemented package API or a release claim. This
+README does not establish an HTTP-secret surface, `secret.use`, envelope keys, a
+usage audit, a Vault page or general Session/log redaction. Existing OpenAPI
+echo checks above qualify only that door. The Wiki decision owns the extension
+and its limits; source and consumer tests establish which behavior is actually
+available.
+
 ## Contribute
 
 Run `pnpm --filter @fungi.computer/veil test` for the package's synthetic
 custody, signed-webhook and public-fetch checks. A unit test does not prove a
 live Nango service or provider account.
+
+`test/fixtures/connections-caller-laws.ts` runs one Connections caller against
+both deterministic external custody
+(`test/connections-caller-conformance.test.ts`) and the pinned native Nango
+server (`test/connections-caller.native.mjs`). Run the native proof from the
+repository root with
+`node_modules/.bin/tsx packages/veil/test/connections-caller.native.mjs` inside
+the host's heavy-command slot. It needs Docker, the existing `docker0` bridge,
+OpenSSL and the pinned image; it creates and removes its own PostgreSQL, Nango,
+TLS provider and SQLite stores. Set `TMPDIR` to an ignored worktree-local
+`.botanical/` directory for its temporary files.
+
+The shared sequence proves a synthetic repository metadata read, durable reopen,
+current grantor/Agent/operation authority, pre-dispatch cancellation, provider
+failure, custodian outage and disconnect with repairable cleanup. Losing the
+acknowledgement after an actual deletion must leave cleanup pending; reopening
+and retrying receives native absence and clears it without restoring access.
+Only the external custodian differs between runs. The native TLS certificate is
+trusted only inside its disposable container. This is static-credential caller
+equivalence, not a live GitHub OAuth ceremony, Hub browser/Session proof or
+production recovery qualification. Suite D separately owns backup/key restore;
+`test/nango-local-custody-suite-d.mjs` is its command entrypoint.
 
 See [`LICENSE`](LICENSE).

@@ -1,10 +1,13 @@
 /* global console, setTimeout, fetch, AbortController, Request, Headers */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
+import process from "node:process";
+import * as Effect from "effect/Effect";
+import { createNangoCustody } from "../src/connections/nango.js";
 
 import { createNangoModelKeyCustodian } from "../src/nango-model-keys.js";
 import { VeilError } from "../src/index.js";
@@ -38,22 +41,32 @@ const syntheticApiKey = `synthetic-suite-d-secret-${run}`;
 
 const seenSecretLeaks = [];
 const cleanupFailures = [];
-/** Fails loudly, instead of silently passing, if the raw secret ever surfaces
- * anywhere this script can see outside the one expected Nango-side log line
- * it never inspects. */
+/** Record canary exposure without printing its value or the captured bytes. */
 function assertNoLeak(label, haystack) {
   if (haystack.includes(syntheticApiKey)) seenSecretLeaks.push(label);
 }
 
 function docker(args, options = {}) {
-  return execFileSync("docker", args, {
-    encoding: "utf8",
-    ...options,
-  }).trim();
+  try {
+    return execFileSync("docker", args, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      ...options,
+    }).trim();
+  } catch {
+    // Child errors contain argv (including generated keys) and captured output.
+    throw new Error(`disposable Docker ${args[0]} failed`);
+  }
 }
 
 function dockerLogsSince(name, since) {
-  return docker(["logs", "--since", since, name]);
+  const result = spawnSync("docker", ["logs", "--since", since, name], {
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  if (result.status !== 0) throw new Error("disposable Docker log read failed");
+  // Docker preserves the container's stdout/stderr distinction. Scan both.
+  return result.stdout + result.stderr;
 }
 
 async function waitFor(check, { timeoutMs = 30_000, intervalMs = 500 } = {}) {
@@ -183,8 +196,7 @@ async function rehearseBackupRestore({
   baseUrl,
   observations,
 }) {
-  const backup = execFileSync(
-    "docker",
+  const backup = docker(
     ["exec", pgName, "pg_dump", "-U", "nango", "-d", "nango", "--format=plain"],
     { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 },
   );
@@ -201,8 +213,7 @@ async function rehearseBackupRestore({
   startPostgres(restorePgName, pgPassword);
   await waitForPostgres(restorePgName);
   // Restore runs against a database that Nango has never seen.
-  execFileSync(
-    "docker",
+  docker(
     [
       "exec",
       "-i",
@@ -239,9 +250,8 @@ async function rehearseBackupRestore({
     assert.equal(restored.status, 200);
     await restored.text();
     assert.equal(observations.length, before + 1);
-    assert.equal(
-      observations[before].authorization,
-      `Bearer ${syntheticApiKey}`,
+    assert.ok(
+      observations[before].authorization === `Bearer ${syntheticApiKey}`,
       "the restored store with the original key must decrypt to the same secret",
     );
     console.log(
@@ -264,6 +274,83 @@ async function rehearseBackupRestore({
     }
   }
   return backup;
+}
+
+// Exercise the current optional Connections adapter too. The historical model-key
+// adapter above is a separate consumer and does not establish this contract.
+async function proveConnectionsCustody(
+  serverUrl,
+  devKey,
+  baseUrl,
+  observations,
+) {
+  const custody = createNangoCustody({
+    serverUrl,
+    apiKey: devKey,
+    webhookSigningKey: "unused-local-signing-key",
+    staticIntegrationId: integrationKey,
+    connectBaseUrl: serverUrl,
+    publicApiUrl: serverUrl,
+  });
+  const address = {
+    ownerId: `team-${run}`,
+    connectionId: `connections-${run}`,
+    credential: { kind: "static", placement: "bearer" },
+  };
+  const locator = await Effect.runPromise(
+    custody.put(address, syntheticApiKey),
+  );
+  console.log(JSON.stringify({ stage: "connections-sealed" }));
+  assert.ok(!locator.includes(syntheticApiKey), "locator must be secret-free");
+  const before = observations.length;
+  const response = await Effect.runPromise(
+    custody.inject(address, locator, new Request(`${baseUrl}/v1/models`)),
+  );
+  assert.equal(response.status, 200);
+  await response.text();
+  console.log(
+    JSON.stringify({ stage: "connections-egress", status: response.status }),
+  );
+  assert.equal(observations.length, before + 1);
+  assert.ok(
+    observations[before].authorization === `Bearer ${syntheticApiKey}`,
+    "Connections must inject the sealed credential at final egress",
+  );
+  assert.equal(
+    await Effect.runPromise(custody.remove(address, locator)),
+    "deleted",
+  );
+  console.log(JSON.stringify({ stage: "connections-removed" }));
+  assert.equal(
+    await Effect.runPromise(custody.remove(address, locator)),
+    "absent",
+  );
+  console.log(JSON.stringify({ stage: "connections-remove-replayed" }));
+  const denied = await Effect.runPromise(
+    custody.inject(address, locator, new Request(`${baseUrl}/v1/models`)).pipe(
+      Effect.matchEffect({
+        onSuccess: (response) =>
+          Effect.promise(async () => {
+            await response.body?.cancel();
+            return `http_${response.status}`;
+          }),
+        onFailure: (error) => Effect.succeed(error.code),
+      }),
+    ),
+  );
+  assert.equal(
+    observations.length,
+    before + 1,
+    "disconnect must deny before egress",
+  );
+  console.log(
+    JSON.stringify({ stage: "connections-after-disconnect", outcome: denied }),
+  );
+  // The pinned proxy maps connection_not_found to HTTP 400/server_error.
+  // That ambiguous envelope also covers refresh failures: it proves refusal,
+  // not a terminal credential verdict. See allProxy.js in the pinned image.
+  assert.equal(denied, "http_400");
+  console.log(JSON.stringify({ stage: "connections-custody-laws-passed" }));
 }
 
 // One linear, step-by-step container orchestration script (low cyclomatic/
@@ -396,9 +483,8 @@ async function main() {
         assert.equal(sendResponse.status, 200);
         await sendResponse.text();
         assert.equal(observations.length, 1);
-        assert.equal(
-          observations[0].authorization,
-          `Bearer ${syntheticApiKey}`,
+        assert.ok(
+          observations[0].authorization === `Bearer ${syntheticApiKey}`,
           "the real server must inject the sealed credential at egress",
         );
         console.log(
@@ -439,6 +525,8 @@ async function main() {
           "no second upstream request after disconnect: denial happens before egress",
         );
         console.log(JSON.stringify({ stage: "disconnect-denies-read" }));
+
+        await proveConnectionsCustody(serverUrl, devKey, baseUrl, observations);
 
         // 4. unavailable after a stalled/stopped custodian: the typed
         // adapter must map a real transport failure to VeilError("unavailable"),
@@ -500,18 +588,30 @@ const failures = [
     ({ operation, cause }) => new Error(operation, { cause }),
   ),
 ];
-if (failures.length > 0)
-  throw new AggregateError(failures, "Veil custody proof or cleanup failed");
-
-console.log(
-  JSON.stringify({
-    result: "passed",
-    run,
-    scope:
-      "Real isolated local Nango (pinned self-hosted image) + real createNangoModelKeyCustodian: " +
-      "connect, final-egress credential injection, backup + original-key restore into a fresh instance " +
-      "(secret decrypts and matches; canary absent from backup and logs), disconnect-denies-read, unavailable-after-stop. " +
-      "Not GitHub OAuth refresh/reconnect-required (needs a real GitHub App; excluded per ticket 05), " +
-      "not Discord/Etsy/hosted BYOK, not production Nango.",
-  }),
-);
+if (failures.length > 0) {
+  // Assertion errors can retain credential-bearing actual/expected values.
+  // Never print arbitrary causes, Docker argv, response bodies or backups.
+  console.error(
+    JSON.stringify({
+      result: "failed",
+      run,
+      failureCount: failures.length,
+      leakLocations: seenSecretLeaks,
+      cleanupOperations: cleanupFailures.map(({ operation }) => operation),
+    }),
+  );
+  process.exitCode = 1;
+} else
+  console.log(
+    JSON.stringify({
+      result: "passed",
+      run,
+      scope:
+        "Real isolated local Nango (pinned self-hosted image) + real createNangoModelKeyCustodian: " +
+        "connect, final-egress credential injection, backup + original-key restore into a fresh instance " +
+        "(secret decrypts and matches; canary absent from backup and logs), disconnect-denies-read, unavailable-after-stop. " +
+        "Current Connections adapter: static intake, injection and repeated disconnect against the same native server. " +
+        "Not GitHub OAuth refresh/reconnect-required (needs a real GitHub App; excluded per ticket 05), " +
+        "not Discord/Etsy/hosted BYOK, not production Nango.",
+    }),
+  );

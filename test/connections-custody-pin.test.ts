@@ -188,13 +188,17 @@ describe("a custodian's credential goes only where its integration is pinned", (
     const h = await harness();
     const started = await h.begin("github-rest", "https://api.github.com");
     expect(h.connections.awaitingCustody()).toBe(1);
-    expect(await run(h.connections.reconcilePending())).toEqual([]);
+    expect(
+      await run(h.connections.reconcilePending(h.connections.completeCustody)),
+    ).toEqual([]);
     h.find({ status: "ambiguous" });
-    expect(await run(h.connections.reconcilePending())).toEqual([]);
+    expect(
+      await run(h.connections.reconcilePending(h.connections.completeCustody)),
+    ).toEqual([]);
     h.find({ status: "found", locator: "nango-1" });
-    expect(await run(h.connections.reconcilePending())).toEqual([
-      started.connectionId,
-    ]);
+    expect(
+      await run(h.connections.reconcilePending(h.connections.completeCustody)),
+    ).toEqual([started.connectionId]);
     expect((await run(h.connections.list("owner")))[0]?.state).toBe("active");
     expect(h.connections.awaitingCustody()).toBe(0);
   });

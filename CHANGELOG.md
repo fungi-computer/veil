@@ -1,5 +1,16 @@
 # @fungi.computer/veil
 
+## 0.7.5
+
+### Patch Changes
+
+- Changes since 0.7.4:
+
+  - fix(hub): recheck management authority before custody completion
+
+- @fungi.computer/mycelium@0.4.1
+  - @fungi.computer/forage@0.3.10
+
 ## 0.7.4
 
 ### Patch Changes

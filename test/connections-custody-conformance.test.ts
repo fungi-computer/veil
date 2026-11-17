@@ -92,7 +92,16 @@ function fakeNango(seen: Seen[]) {
     if (url.pathname.startsWith("/proxy/")) {
       proxied.push(request.headers);
       const found = held.get(request.headers.get("connection-id") ?? "");
-      if (found === undefined) return json({ error: "unknown" }, 404);
+      if (found === undefined)
+        return json(
+          {
+            error: {
+              code: "server_error",
+              message: "Failed to get connection",
+            },
+          },
+          400,
+        );
       seen.push({
         url:
           (request.headers.get("base-url-override") ?? "") +
@@ -163,6 +172,15 @@ const code = (effect: Effect.Effect<unknown, ConnectionsError>) =>
     }),
   );
 
+/** A failed proxy response also refuses use; Nango's 400 is not terminal credential evidence. */
+const proxyCode = (effect: Effect.Effect<Response, ConnectionsError>) =>
+  Effect.runPromise(
+    Effect.match(effect, {
+      onSuccess: (response) => (response.ok ? "ok" : "refused"),
+      onFailure: (error) => error.code,
+    }),
+  );
+
 /** The laws every custodian keeps, whatever it stores and wherever it sends. */
 describe.each([sealed, nango])("custody conformance: $name", (subject) => {
   it("keeps a credential it can use but never show", async () => {
@@ -188,14 +206,14 @@ describe.each([sealed, nango])("custody conformance: $name", (subject) => {
 
   it("refuses a locator it does not hold, and sends nothing", async () => {
     const { custody, seen } = subject.make();
-    const refused = await code(
+    const refused = await proxyCode(
       custody.inject(
         address,
         "nobody",
         new Request("https://api.example.com/"),
       ),
     );
-    expect(["reconnect_required", "unavailable"]).toContain(refused);
+    expect(["refused", "reconnect_required", "unavailable"]).toContain(refused);
     expect(seen).toEqual([]);
   });
 
@@ -205,7 +223,7 @@ describe.each([sealed, nango])("custody conformance: $name", (subject) => {
     expect(await run(custody.remove(address, locator))).toBe("deleted");
     expect(await run(custody.remove(address, locator))).toBe("absent");
     expect(
-      await code(
+      await proxyCode(
         custody.inject(
           address,
           locator,
@@ -279,12 +297,14 @@ describe("an authorization Nango runs", () => {
     const custody = createNangoCustody(nangoOptions);
     const database = new DatabaseSync(":memory:");
     let counter = 0;
+    let managerAllowed = true;
+    let now = 1_000_000;
     const options = {
       ownerId: "owner-1",
       store: fromNodeSqlite(database),
       custody,
-      authorize: (actor: string) => actor === "owner",
-      clock: () => 1_000_000,
+      authorize: (actor: string) => actor === "owner" && managerAllowed,
+      clock: () => now,
       ids: () => `id${String((counter += 1))}`,
     };
     const connections = createConnections({ ...options, custodyProviders });
@@ -307,7 +327,21 @@ describe("an authorization Nango runs", () => {
       }),
     );
     const state = `owner-1.id2`;
-    return { seen, remote, custody, connections, reopened, started, state };
+    return {
+      seen,
+      remote,
+      custody,
+      connections,
+      reopened,
+      started,
+      state,
+      revokeManager: () => {
+        managerAllowed = false;
+      },
+      expire: () => {
+        now = 3_000_000;
+      },
+    };
   }
 
   it("sends the owner to Connect, then activates only on a signed completion for that attempt", async () => {
@@ -336,6 +370,76 @@ describe("an authorization Nango runs", () => {
         }),
       ),
     ).toBe("denied");
+  });
+
+  it("rejects altered callback bytes even when the original signature was valid", async () => {
+    const h = await connected();
+    const body = completion(h.state);
+    const altered = completion(h.state, { connectionId: "foreign-locator" });
+    await expect(
+      h.custody.verifyCompletion(altered, signed(body)),
+    ).rejects.toMatchObject({ code: "denied" });
+    expect((await run(h.connections.list("owner")))[0]?.state).toBe("pending");
+    expect(h.seen).toEqual([]);
+  });
+
+  it.each([
+    { endUser: { endUserId: "foreign-user", organizationId: "owner-1" } },
+    { endUser: { endUserId: "owner", organizationId: "foreign-team" } },
+    { success: false },
+  ])(
+    "rejects a signed completion with inconsistent identity or failed authorization: %j",
+    async (over) => {
+      const h = await connected();
+      const body = completion(h.state, over);
+      await expect(
+        h.custody.verifyCompletion(body, signed(body)),
+      ).rejects.toMatchObject({ code: "denied" });
+      expect((await run(h.connections.list("owner")))[0]?.state).toBe(
+        "pending",
+      );
+      expect(h.seen).toEqual([]);
+    },
+  );
+
+  it("denies foreign state and principal without consuming the legitimate attempt", async () => {
+    const h = await connected();
+    const body = completion(h.state);
+    const verified = await h.custody.verifyCompletion(body, signed(body));
+    for (const over of [
+      { state: "foreign-team.id2" },
+      { principalId: "foreign-user" },
+    ]) {
+      expect(
+        await code(h.connections.completeCustody({ ...verified, ...over })),
+      ).toBe("denied");
+      expect((await run(h.connections.list("owner")))[0]?.state).toBe(
+        "pending",
+      );
+    }
+    expect(await code(h.connections.completeCustody(verified))).toBe("ok");
+    expect(h.seen).toEqual([]);
+  });
+
+  it("denies an expired signed completion before activating the Connection", async () => {
+    const h = await connected();
+    const body = completion(h.state);
+    const verified = await h.custody.verifyCompletion(body, signed(body));
+    h.expire();
+    expect(await code(h.connections.completeCustody(verified))).toBe("denied");
+    expect((await run(h.connections.list("owner")))[0]?.state).not.toBe(
+      "active",
+    );
+    expect(h.seen).toEqual([]);
+  });
+
+  it("rechecks management authority when a signed custody completion arrives", async () => {
+    const h = await connected();
+    const body = completion(h.state);
+    const verified = await h.custody.verifyCompletion(body, signed(body));
+    h.revokeManager();
+    expect(await code(h.connections.completeCustody(verified))).toBe("denied");
+    expect(h.seen).toEqual([]);
   });
 
   it("serves the granted Agent through the proxy once settled, and the state is single use", async () => {

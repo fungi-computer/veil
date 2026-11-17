@@ -425,6 +425,7 @@ export function createConnections(options: ConnectionsOptions) {
     },
     claimCustody: (state, principalId) =>
       transactionSync(() => {
+        authorize(principalId, "manage");
         if (!state.startsWith(`${ownerId}.`))
           throw new ConnectionsError("denied");
         const attempt = rows(
@@ -952,7 +953,10 @@ export function createConnections(options: ConnectionsOptions) {
       "SELECT * FROM veil_connection_attempts WHERE status = 'pending' AND pkceVerifierSealed IS NULL AND issuer LIKE 'custody:%' AND expiresAt > ? ORDER BY expiresAt LIMIT 16",
       options.clock(),
     );
-  const reconcileAttempt = (attempt: AttemptRow) =>
+  const reconcileAttempt = (
+    attempt: AttemptRow,
+    complete: typeof oauthFlow.completeCustody,
+  ) =>
     Effect.gen(function* () {
       const find = options.custody.find;
       if (find === undefined) return null;
@@ -965,7 +969,7 @@ export function createConnections(options: ConnectionsOptions) {
       if (found.status === "ambiguous")
         return yield* Effect.fail(new ConnectionsError("conflict"));
       if (found.status === "unresolved") return null;
-      const done = yield* oauthFlow.completeCustody({
+      const done = yield* complete({
         state: attempt.state,
         locator: found.locator,
         principalId: attempt.actor,
@@ -973,12 +977,15 @@ export function createConnections(options: ConnectionsOptions) {
       });
       return done.connectionId;
     });
-  /** The connections a custodian finished that no webhook told us about. */
-  const reconcilePending = () =>
+  /** Recover lost callbacks through the host's same live-authorized completion.
+   * A host whose authorize port is already live can pass completeCustody directly. */
+  const reconcilePending = (complete: typeof oauthFlow.completeCustody) =>
     Effect.gen(function* () {
       const settled: string[] = [];
       for (const attempt of yield* sync(awaitingCustody)) {
-        const outcome = yield* reconcileAttempt(attempt).pipe(Effect.result);
+        const outcome = yield* reconcileAttempt(attempt, complete).pipe(
+          Effect.result,
+        );
         if (outcome._tag === "Success" && outcome.success !== null)
           settled.push(outcome.success);
       }
