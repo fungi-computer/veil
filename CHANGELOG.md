@@ -1,5 +1,14 @@
 # @fungi.computer/veil
 
+## 0.10.0
+
+### Minor Changes
+
+- Changes since 0.9.0:
+
+  - feat(veil): scope an HTTP secret's destinations by update and audit every
+    Connection use
+
 ## 0.9.0
 
 ### Minor Changes

@@ -638,6 +638,223 @@ it("audits a revoke seen after the send, and a custodian failure, as protected r
   }
 });
 
+it("narrows a secret's destinations without its value, refuses widening unless the value is re-entered, and audits the narrowed-away host", async () => {
+  const h = fixture();
+  try {
+    const { connectionId } = await Effect.runPromise(
+      h.connections.begin("owner", {
+        requestId: "scope",
+        name: "Scope",
+        surface: {
+          kind: "http",
+          destinations: [
+            { host: "api.example.com", methods: ["GET", "POST"] },
+            { host: "files.example.com", pathPrefix: "/v1", methods: ["GET"] },
+          ],
+        },
+        credential: { kind: "static", placement: "bearer" },
+        secret: h.secret,
+      }),
+    );
+    const subject = { kind: "computer", id: "work" } as const;
+    await Effect.runPromise(
+      h.connections.grant("owner", {
+        subject,
+        target: { kind: "secret", id: connectionId },
+        capability: "secret.use",
+        tools: "all",
+      }),
+    );
+    const update = (
+      requestId: string,
+      expectedVersion: number,
+      destinations: Parameters<typeof h.connections.update>[1]["destinations"],
+      secret?: string,
+    ) => {
+      const input = { requestId, connectionId, expectedVersion, destinations };
+      return Effect.runPromise(
+        Effect.result(
+          h.connections.update(
+            "owner",
+            secret === undefined
+              ? input
+              : {
+                  ...input,
+                  credential: { kind: "static", placement: "bearer" },
+                  secret,
+                },
+          ),
+        ),
+      );
+    };
+    const narrowed = await update("narrow", 1, [
+      {
+        host: "files.example.com",
+        pathPrefix: "/v1/reports",
+        methods: ["GET"],
+      },
+    ]);
+    expect(narrowed._tag).toBe("Success");
+    const version = narrowed._tag === "Success" ? narrowed.success.version : 0;
+    for (const widened of [
+      [{ host: "evil.example.net", methods: ["GET"] as const }],
+      [{ host: "files.example.com", methods: ["GET"] as const }],
+      [
+        {
+          host: "files.example.com",
+          pathPrefix: "/v1/reports",
+          methods: ["DELETE"] as const,
+        },
+      ],
+    ]) {
+      const refused = await update(
+        `widen-${widened[0]?.host ?? ""}-${widened[0]?.methods[0] ?? ""}`,
+        version,
+        [...widened],
+      );
+      expect(refused._tag === "Failure" && refused.failure.code).toBe("denied");
+    }
+    const invalid = await update(
+      "invalid",
+      version,
+      [{ host: "files.example.com.", methods: ["GET"] }],
+      h.secret,
+    );
+    expect(invalid._tag === "Failure" && invalid.failure.code).toBe(
+      "invalid_input",
+    );
+    const [view] = Effect.runSync(h.connections.list("owner"));
+    expect(view?.surface.destinations).toEqual([
+      {
+        host: "files.example.com",
+        pathPrefix: "/v1/reports",
+        methods: ["GET"],
+      },
+    ]);
+    expect(view?.grants.map((grant) => grant.subject)).toEqual([subject]);
+    const grantVersion = view?.grants[0]?.version ?? 0;
+    const send = h.connections.egress(subject, { connectionId, grantVersion });
+    await expect(
+      send("https://api.example.com/items", { redirect: "manual" }),
+    ).rejects.toMatchObject({ code: "denied" });
+    expect(
+      (
+        await send("https://files.example.com/v1/reports/q3", {
+          redirect: "manual",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      Effect.runSync(h.connections.audit("owner", connectionId)).map(
+        ({ host, outcome }) => [host, outcome],
+      ),
+    ).toEqual([
+      [null, "refused_destination"],
+      ["files.example.com", "placed"],
+      ["files.example.com", "upstream_status"],
+    ]);
+    // Re-entering the value may widen the binding again.
+    const rotated = `${h.secret}-rotated`;
+    const widened = await update(
+      "widen-with-value",
+      version,
+      [{ host: "api.example.com", methods: ["GET"] }],
+      rotated,
+    );
+    expect(widened._tag).toBe("Success");
+    const [after] = Effect.runSync(h.connections.list("owner"));
+    expect(after?.grants.map((grant) => grant.subject)).toEqual([subject]);
+    const again = h.connections.egress(subject, {
+      connectionId,
+      grantVersion: after?.grants[0]?.version ?? 0,
+    });
+    await again("https://api.example.com/items", { redirect: "manual" });
+    expect(h.sent.at(-1)?.headers.get("authorization")).toBe(
+      `Bearer ${rotated}`,
+    );
+    expect(JSON.stringify([...h.stored.values()])).not.toContain(h.secret);
+  } finally {
+    h.database.close();
+  }
+});
+
+it("never lets an HTTP secret lose its static value", async () => {
+  const h = fixture();
+  try {
+    const { connectionId } = await Effect.runPromise(
+      h.connections.begin("owner", {
+        requestId: "keep",
+        name: "Keep",
+        surface: {
+          kind: "http",
+          destinations: [{ host: "api.example.com", methods: ["GET"] }],
+        },
+        credential: { kind: "static", placement: "bearer" },
+        secret: h.secret,
+      }),
+    );
+    const cleared = await Effect.runPromise(
+      Effect.result(
+        h.connections.update("owner", {
+          requestId: "clear",
+          connectionId,
+          expectedVersion: 1,
+          credential: { kind: "none" },
+        }),
+      ),
+    );
+    expect(cleared._tag === "Failure" && cleared.failure.code).toBe(
+      "invalid_input",
+    );
+  } finally {
+    h.database.close();
+  }
+});
+
+it("audits every use of a Connection's credential, not only HTTP secrets", async () => {
+  const h = fixture();
+  try {
+    const { connectionId } = await Effect.runPromise(
+      h.connections.begin("owner", {
+        requestId: "mcp",
+        name: "Tracker",
+        surface: { kind: "mcp", url: "https://mcp.example.com/mcp" },
+        credential: { kind: "static", placement: "bearer" },
+        secret: h.secret,
+      }),
+    );
+    const subject = { kind: "agent", id: "helper" } as const;
+    const grant = await Effect.runPromise(
+      h.connections.grant("owner", {
+        subject,
+        target: { kind: "connection", id: connectionId },
+        capability: "connector.call",
+        tools: "all",
+      }),
+    );
+    const send = h.connections.egress(subject, { connectionId, ...grant });
+    await send("https://mcp.example.com/mcp", {
+      method: "POST",
+      redirect: "manual",
+    });
+    await expect(
+      send("https://other.example.com/mcp", { redirect: "manual" }),
+    ).rejects.toMatchObject({ code: "denied" });
+    const audit = Effect.runSync(h.connections.audit("owner", connectionId));
+    expect(
+      audit.map(({ host, method, outcome }) => [host, method, outcome]),
+    ).toEqual([
+      ["mcp.example.com", "POST", "placed"],
+      ["mcp.example.com", "POST", "upstream_status"],
+      [null, "GET", "refused_destination"],
+    ]);
+    expect(JSON.stringify(audit)).not.toContain("/mcp");
+    expect(JSON.stringify(audit)).not.toContain(h.secret);
+  } finally {
+    h.database.close();
+  }
+});
+
 it("strips routing headers so a placed value goes only where its URL says", async () => {
   const h = fixture();
   try {

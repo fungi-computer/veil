@@ -245,6 +245,11 @@ export const updateInputSchema = Schema.Struct({
   /** Replacement OpenAPI operation table, decoded by Forage. */
   table: Schema.optional(Schema.Array(Schema.Unknown)),
   baseUrl: Schema.optional(Schema.String),
+  /**
+   * An HTTP secret's new destination rules. Without a new secret they may only
+   * narrow the stored rules: a widened binding needs the value re-entered.
+   */
+  destinations: Schema.optional(destinationsSchema),
   /** Credential swap; `none` and `static` only. */
   credential: Schema.optional(credentialSchema),
   secret: Schema.optional(

@@ -3,10 +3,37 @@ import {
   ConnectionsError,
   updateInputSchema,
   type ConnectionsOptions,
+  type HttpDestinations,
   type UpdateInput,
 } from "./contract.js";
+import { validateDestinations } from "./egress.js";
 import { decode, io, sync, type ConnectionRow } from "./internal.js";
 import { decodeTable } from "./openapi.js";
+
+/** Whether a path prefix admits nothing outside the stored one, as egress matches it. */
+const pathWithin = (stored: string | undefined, next: string | undefined) =>
+  stored === undefined ||
+  (next !== undefined &&
+    (next === stored ||
+      next.startsWith(stored.endsWith("/") ? stored : `${stored}/`)));
+
+/**
+ * Whether every next rule admits only requests a stored rule already admits:
+ * the same exact host, a subset of its methods and a path at or below it.
+ */
+function narrowsDestinations(
+  stored: HttpDestinations,
+  next: HttpDestinations,
+): boolean {
+  return next.every((rule) =>
+    stored.some(
+      (held) =>
+        held.host === rule.host &&
+        rule.methods.every((method) => held.methods.includes(method)) &&
+        pathWithin(held.pathPrefix, rule.pathPrefix),
+    ),
+  );
+}
 
 /** The owner's SQLite as `update` sees it; every method is one synchronous step or transaction. */
 export type UpdateStore = Readonly<{
@@ -29,6 +56,7 @@ export type UpdateStore = Readonly<{
       baseUrl: string;
       table: ConnectionRow["surface"]["table"];
       digest: string | null;
+      destinations: HttpDestinations | undefined;
       credential: ConnectionRow["credential"];
       locator: string | null;
     }>,
@@ -71,6 +99,7 @@ export function createUpdate(deps: {
         input.label ?? null,
         input.baseUrl ?? null,
         input.table === undefined ? null : JSON.stringify(input.table),
+        input.destinations ?? null,
         input.credential ?? null,
         input.secret !== undefined,
       ]);
@@ -95,6 +124,28 @@ export function createUpdate(deps: {
           found.surface.kind !== "openapi"
         )
           throw new ConnectionsError("invalid_input");
+        if (input.destinations !== undefined) {
+          if (found.surface.kind !== "http")
+            throw new ConnectionsError("invalid_input");
+          validateDestinations(input.destinations);
+          // A value may only reach a host it was entered for: widening the
+          // binding without re-entering the value would let a manager read it.
+          if (
+            input.secret === undefined &&
+            !narrowsDestinations(
+              found.surface.destinations ?? [],
+              input.destinations,
+            )
+          )
+            throw new ConnectionsError("denied");
+        }
+        // An HTTP secret is always a static value: it cannot lose its credential.
+        if (
+          found.surface.kind === "http" &&
+          input.credential !== undefined &&
+          input.credential.kind !== "static"
+        )
+          throw new ConnectionsError("invalid_input");
         // A new destination must not inherit a credential sealed for the old one.
         if (
           input.baseUrl !== undefined &&
@@ -106,10 +157,14 @@ export function createUpdate(deps: {
         if (input.name !== undefined) store.checkName(input.name, found.id);
         return found;
       });
+      // An HTTP secret's first bound host stands for it where one origin is needed.
+      const firstHost = input.destinations?.[0]?.host;
       const baseUrl = yield* sync(() =>
-        input.baseUrl === undefined
-          ? row.surface.url
-          : store.publicUrl(input.baseUrl),
+        firstHost !== undefined
+          ? store.publicUrl(`https://${firstHost}/`)
+          : input.baseUrl === undefined
+            ? row.surface.url
+            : store.publicUrl(input.baseUrl),
       );
       const next =
         input.table === undefined
@@ -132,6 +187,7 @@ export function createUpdate(deps: {
           baseUrl,
           table: next?.operations ?? row.surface.table,
           digest: next?.digest ?? row.surface.digest ?? null,
+          destinations: input.destinations ?? row.surface.destinations,
           credential,
           locator,
         }),

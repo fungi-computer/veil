@@ -996,6 +996,58 @@ export function createConnections(options: ConnectionsOptions) {
       return response;
     });
 
+  /**
+   * One use of a connection's credential as the audit records it: the bound
+   * host, a fixed path shape and the method. Never the value, path or query.
+   */
+  const observeUse = (
+    usage: Readonly<{ subject: ConnectionSubject; ref: EgressRef }>,
+    targetUrl: URL | null,
+    method: string,
+  ): UsageEvent => {
+    const row = connection(usage.ref.connectionId);
+    const subject = decode(subjectSchema, usage.subject);
+    const host =
+      row.surface.kind === "http"
+        ? (row.surface.destinations?.find(
+            (rule) => rule.host === targetUrl?.hostname,
+          )?.host ?? null)
+        : // A Connection's one owner-configured origin is its only host.
+          new URL(row.surface.url).hostname === targetUrl?.hostname
+          ? targetUrl.hostname
+          : null;
+    const path = targetUrl?.pathname ?? "/";
+    const knownMethod = [
+      "GET",
+      "HEAD",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ].includes(method.toUpperCase())
+      ? method.toUpperCase()
+      : "OTHER";
+    return decode(usageEventSchema, {
+      requestId: options.ids(),
+      connectionId: row.id,
+      subject,
+      grantor: grant(row.id, subject)?.grantor ?? null,
+      host,
+      pathTemplate:
+        path === "/"
+          ? "/"
+          : path.slice(1).includes("/")
+            ? "/:segment/…"
+            : "/:segment",
+      pathLength:
+        path.length < 64 ? "short" : path.length < 256 ? "medium" : "long",
+      method: knownMethod,
+      outcome: "placed",
+      status: null,
+    });
+  };
+
   const fetchThrough = (
     admit: () => ReturnType<typeof admitted>,
     target: Parameters<NarrowFetch>[0],
@@ -1009,55 +1061,16 @@ export function createConnections(options: ConnectionsOptions) {
         const observed =
           usage === undefined
             ? null
-            : yield* sync(() => {
-                const row = connection(usage.ref.connectionId);
-                if (row.surface.kind !== "http") return null;
-                const subject = decode(subjectSchema, usage.subject);
-                const targetUrl = URL.parse(
-                  target instanceof Request ? target.url : String(target),
-                );
-                const host =
-                  row.surface.destinations?.find(
-                    (rule) => rule.host === targetUrl?.hostname,
-                  )?.host ?? null;
-                const path = targetUrl?.pathname ?? "/";
-                const method =
+            : yield* sync(() =>
+                observeUse(
+                  usage,
+                  URL.parse(
+                    target instanceof Request ? target.url : String(target),
+                  ),
                   init?.method ??
-                  (target instanceof Request ? target.method : "GET");
-                const knownMethod = [
-                  "GET",
-                  "HEAD",
-                  "POST",
-                  "PUT",
-                  "PATCH",
-                  "DELETE",
-                  "OPTIONS",
-                ].includes(method.toUpperCase())
-                  ? method.toUpperCase()
-                  : "OTHER";
-                return decode(usageEventSchema, {
-                  requestId: options.ids(),
-                  connectionId: row.id,
-                  subject,
-                  grantor: grant(row.id, subject)?.grantor ?? null,
-                  host,
-                  pathTemplate:
-                    path === "/"
-                      ? "/"
-                      : path.slice(1).includes("/")
-                        ? "/:segment/…"
-                        : "/:segment",
-                  pathLength:
-                    path.length < 64
-                      ? "short"
-                      : path.length < 256
-                        ? "medium"
-                        : "long",
-                  method: knownMethod,
-                  outcome: "placed",
-                  status: null,
-                });
-              });
+                    (target instanceof Request ? target.method : "GET"),
+                ),
+              );
         // An unwritable audit refuses the use: nothing is sent unaudited.
         const auditState = { failed: false };
         const record = (outcome: UsageEvent["outcome"]) => {
@@ -1153,38 +1166,91 @@ export function createConnections(options: ConnectionsOptions) {
   const callThrough = (
     admit: () => ReturnType<typeof admitted>,
     raw: CallInput,
+    usage?: Readonly<{ subject: ConnectionSubject; ref: EgressRef }>,
   ) =>
     Effect.gen(function* () {
       const wanted = yield* sync(() => decode(callInputSchema, raw));
       let chosen: OpenApiOperation | undefined;
-      const response = yield* deliver(admit, (row, tools) =>
-        Effect.gen(function* () {
-          if (row.surface.kind !== "openapi")
-            return yield* Effect.fail(new ConnectionsError("unsupported"));
-          const table = yield* io(() => decodeTable(row.surface.table));
-          chosen = table.operations.find(
-            (candidate) => candidate.name === wanted.operation,
+      // The same audit as egress: an unwritable row refuses the call.
+      let phase: "grant" | "destination" | "upstream" = "grant";
+      let status: number | null = null;
+      let built: Request | null = null;
+      let observed: UsageEvent | null = null;
+      const auditState = { failed: false };
+      const record = (outcome: UsageEvent["outcome"]) => {
+        if (usage === undefined) return;
+        try {
+          observed ??= observeUse(
+            usage,
+            built === null ? null : new URL(built.url),
+            built?.method ?? "GET",
           );
-          if (chosen === undefined || !admits(tools, chosen))
-            return yield* Effect.fail(new ConnectionsError("denied"));
-          const picked = chosen;
-          const built = yield* io(() =>
-            operationRequest(row.surface.url, picked, wanted.input),
+          writeAudit({ ...observed, outcome, status });
+        } catch (cause) {
+          auditState.failed = true;
+          throw cause;
+        }
+      };
+      const delivered = yield* deliver(
+        admit,
+        (row, tools) =>
+          Effect.gen(function* () {
+            if (row.surface.kind !== "openapi")
+              return yield* Effect.fail(new ConnectionsError("unsupported"));
+            const table = yield* io(() => decodeTable(row.surface.table));
+            chosen = table.operations.find(
+              (candidate) => candidate.name === wanted.operation,
+            );
+            if (chosen === undefined || !admits(tools, chosen))
+              return yield* Effect.fail(new ConnectionsError("denied"));
+            const picked = chosen;
+            const request = yield* io(() =>
+              operationRequest(row.surface.url, picked, wanted.input),
+            );
+            built = request;
+            phase = "destination";
+            const admittedRequest = yield* io(() =>
+              admitRequest(
+                { kind: "openapi", url: row.surface.url },
+                "all",
+                request,
+                policy,
+              ),
+            );
+            phase = "grant";
+            return {
+              request: admittedRequest,
+              operation: { name: picked.name, effect: picked.effect },
+            };
+          }),
+        () => {
+          record("placed");
+          phase = "upstream";
+        },
+      ).pipe(Effect.result);
+      if (delivered._tag === "Failure") {
+        const failure = delivered.failure;
+        if (auditState.failed) return yield* Effect.fail(failure);
+        yield* sync(() => {
+          record(
+            phase === "destination"
+              ? "refused_destination"
+              : phase === "upstream" && failure.code === "invalid_response"
+                ? "upstream_status"
+                : "refused_grant",
           );
-          const request = yield* io(() =>
-            admitRequest(
-              { kind: "openapi", url: row.surface.url },
-              "all",
-              built,
-              policy,
-            ),
-          );
-          return {
-            request,
-            operation: { name: picked.name, effect: picked.effect },
-          };
-        }),
-      );
+        });
+        return yield* Effect.fail(failure);
+      }
+      const response = delivered.success;
+      status = response.status;
+      const audited = yield* sync(() => {
+        record("upstream_status");
+      }).pipe(Effect.result);
+      if (audited._tag === "Failure") {
+        yield* io(() => response.body?.cancel() ?? Promise.resolve());
+        return yield* Effect.fail(audited.failure);
+      }
       const operation = chosen;
       if (operation === undefined)
         return yield* Effect.fail(new ConnectionsError("denied"));
@@ -1202,7 +1268,7 @@ export function createConnections(options: ConnectionsOptions) {
     raw: CallInput,
   ) => {
     const ref = decode(egressRefSchema, input);
-    return callThrough(() => admitted(subject, ref), raw);
+    return callThrough(() => admitted(subject, ref), raw, { subject, ref });
   };
 
   /** The owner as sender: no Agent grant, and a version they last saw, when they name one. */
@@ -1357,6 +1423,7 @@ export function createConnections(options: ConnectionsOptions) {
               url: next.baseUrl,
               table: next.table,
               digest: next.digest,
+              destinations: next.destinations,
               label: input.label ?? current.surface.label ?? current.name,
             }),
             JSON.stringify(next.credential),
