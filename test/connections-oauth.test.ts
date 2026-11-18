@@ -256,7 +256,7 @@ function harness(ownerId = "owner-1") {
     await client.connect(
       new StreamableHTTPClientTransport(new URL(mcp), {
         fetch,
-        requestInit: { redirect: "error" },
+        requestInit: { redirect: "manual" },
       }),
     );
     try {
@@ -442,7 +442,7 @@ describe("oauth connections", () => {
               id: 1,
               method: "tools/list",
             }),
-            redirect: "error",
+            redirect: "manual",
           }),
         ),
       ),

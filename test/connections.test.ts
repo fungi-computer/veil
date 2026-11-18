@@ -20,7 +20,7 @@ const post = (body: string, init: RequestInit = {}) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body,
-    redirect: "error",
+    redirect: "manual",
     ...init,
   });
 
@@ -151,7 +151,7 @@ describe("sealed custody", () => {
       custody.inject(
         address,
         locator,
-        new Request(mcpUrl, { redirect: "error" }),
+        new Request(mcpUrl, { redirect: "manual" }),
       ),
     );
     expect(new URL(sent[0]?.url ?? "").searchParams.get("key")).toBe(marker);
@@ -212,7 +212,8 @@ describe("openapi surface", () => {
         grantVersion,
       },
     );
-    const get = (url: string) => fetch(new Request(url, { redirect: "error" }));
+    const get = (url: string) =>
+      fetch(new Request(url, { redirect: "manual" }));
     expect((await get("https://api.example.com/v1/ping")).status).toBe(200);
     expect(await code(get("https://api.example.com/v2/ping"))).toBe("denied");
     expect(await code(get("https://api.example.com/v1evil/ping"))).toBe(
@@ -224,7 +225,7 @@ describe("openapi surface", () => {
           method: "POST",
           body: bytes,
           headers: { "content-type": "application/octet-stream" },
-          redirect: "error",
+          redirect: "manual",
         }),
       );
     const binary = Uint8Array.from({ length: 256 }, (_, i) => i);
@@ -435,7 +436,7 @@ describe("connections core", () => {
           new Request("https://evil.example.net/mcp", {
             method: "POST",
             body,
-            redirect: "error",
+            redirect: "manual",
           }),
         ),
       ),
@@ -446,7 +447,7 @@ describe("connections core", () => {
           new Request("https://mcp.example.com/other", {
             method: "POST",
             body,
-            redirect: "error",
+            redirect: "manual",
           }),
         ),
       ),

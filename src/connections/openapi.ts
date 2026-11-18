@@ -84,7 +84,7 @@ export async function operationRequest(
     const init: RequestInit = {
       method: operation.method,
       headers,
-      redirect: "error",
+      redirect: "manual",
     };
     if (body !== undefined) init.body = body;
     return new Request(url, init);

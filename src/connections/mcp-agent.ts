@@ -42,7 +42,7 @@ export async function answerEgressRequest(
     const init: RequestInit = {
       method: data.method,
       headers: data.headers.map(([name, value]) => [name, value]),
-      redirect: "error",
+      redirect: "manual",
     };
     if (data.body !== null) init.body = data.body;
     return await egress(subject, ref)(data.url, init);

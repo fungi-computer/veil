@@ -1,5 +1,18 @@
 # @fungi.computer/veil
 
+## 0.9.0
+
+### Minor Changes
+
+- Changes since 0.8.2:
+
+  - fix(veil): strip routing headers before a Connection places a value
+  - fix(veil): send Connection requests with a manual redirect so Workers accept
+    them
+  - feat(computer): place Vault keys from Hub and Oyster gateways for Agent
+    commands
+  - feat(veil): mask a bound host's echo of a placed secret and audit it
+
 ## 0.8.2
 
 ### Patch Changes

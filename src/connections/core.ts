@@ -24,6 +24,7 @@ import {
   type ConnectionView,
   type ConnectionsOptions,
   type CustodyAddress,
+  type CustodyObserver,
   type EgressRef,
   type NarrowFetch,
   type ConnectionSubject,
@@ -240,7 +241,8 @@ export function createConnections(options: ConnectionsOptions) {
         now,
         now,
         stored.outcome === "refused_destination" ||
-          stored.outcome === "refused_grant"
+          stored.outcome === "refused_grant" ||
+          stored.outcome === "echo_redacted"
           ? 1
           : 0,
         JSON.stringify(stored),
@@ -928,6 +930,7 @@ export function createConnections(options: ConnectionsOptions) {
       ConnectionsError
     >,
     beforeSend?: () => void,
+    observer?: CustodyObserver,
   ) =>
     Effect.gen(function* () {
       const { row, tools, grantor, subject } = yield* sync(admit);
@@ -962,7 +965,12 @@ export function createConnections(options: ConnectionsOptions) {
         (
           row.credential.kind === "oauth" && options.custody.open !== undefined
             ? oauthFlow.send(row, request)
-            : options.custody.inject(address(row), row.locator ?? "", request)
+            : options.custody.inject(
+                address(row),
+                row.locator ?? "",
+                request,
+                observer,
+              )
         ).pipe(
           Effect.tapError((error) =>
             error.code === "reconnect_required"
@@ -1093,6 +1101,11 @@ export function createConnections(options: ConnectionsOptions) {
           () => {
             record("placed");
             phase = "upstream";
+          },
+          {
+            echoed: () => {
+              record("echo_redacted");
+            },
           },
         ).pipe(Effect.result);
         if (result._tag === "Failure") {

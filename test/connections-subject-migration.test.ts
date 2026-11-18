@@ -85,7 +85,7 @@ it("reopens every stored agent grant as a subject grant without widening authori
     const ref = { connectionId: "notes", grantVersion: 7 };
     const request = () =>
       new Request("https://notes.example.com/mcp", {
-        redirect: "error",
+        redirect: "manual",
         method: "POST",
         body: JSON.stringify({
           jsonrpc: "2.0",

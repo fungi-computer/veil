@@ -29,6 +29,8 @@ export class ConnectionsError extends Error {
 
 /** How long a sign-in attempt stays open before it expires. */
 export const attemptTtlMs = 10 * 60 * 1000;
+/** The largest request body a subject's send may carry. */
+export const connectionBodyLimit = 256 * 1024;
 
 export const identifier = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[A-Za-z0-9_.:-]{1,128}$/u)),
@@ -199,6 +201,8 @@ export const usageEventSchema = Schema.Struct({
     "placed",
     "refused_destination",
     "refused_grant",
+    /** The response echoed the placed value; what reached the caller was masked. */
+    "echo_redacted",
     "upstream_status",
   ]),
   status: Schema.NullOr(Schema.Number),
@@ -268,6 +272,11 @@ export type CustodyAddress = Readonly<{
   connectionId: string;
   credential: Credential;
 }>;
+/** What custody reports about one send while its response streams. */
+export type CustodyObserver = Readonly<{
+  /** The response carried the placed value, at most once per send. */
+  echoed: () => void;
+}>;
 /**
  * Owner-side credential custody. `sealed` stores ciphertext, `nango` a locator.
  * Only `inject` ever opens a credential, and it sends the request itself.
@@ -281,6 +290,7 @@ export type CustodyAdapter = Readonly<{
     address: CustodyAddress,
     locator: string,
     request: Request,
+    observer?: CustodyObserver,
   ) => Effect.Effect<Response, ConnectionsError>;
   remove: (
     address: CustodyAddress,

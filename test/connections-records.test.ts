@@ -333,7 +333,7 @@ describe("connection records", () => {
     // Raw egress cannot tell effects apart, so only an `all` grant may use it.
     const raw = h.connections.egress({ kind: "agent", id: "agent-a" }, ref(1));
     await expect(
-      raw(new Request(`${base}/pets/1`, { redirect: "error" })),
+      raw(new Request(`${base}/pets/1`, { redirect: "manual" })),
     ).rejects.toMatchObject({ code: "denied" });
     const named = await h.run(
       h.connections.grant("owner", {
@@ -374,7 +374,7 @@ describe("connection records", () => {
         await h.connections.egress(
           { kind: "agent", id: "agent-a" },
           ref(all.grantVersion),
-        )(new Request(`${base}/pets/2`, { redirect: "error" }))
+        )(new Request(`${base}/pets/2`, { redirect: "manual" }))
       ).status,
     ).toBe(200);
     // An effect grant means nothing on an MCP surface.

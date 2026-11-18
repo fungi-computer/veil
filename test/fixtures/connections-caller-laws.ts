@@ -250,7 +250,7 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
       )(
         new Request(`${subject.baseUrl}/repos/fixture/selected`, {
           signal: aborted.signal,
-          redirect: "error",
+          redirect: "manual",
         }),
       ),
       { name: "ConnectionsError", code: "unavailable" },

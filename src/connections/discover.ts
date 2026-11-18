@@ -12,7 +12,7 @@ export async function listMcpTools(
   await client.connect(
     new sdk.StreamableHTTPClientTransport(new URL(url), {
       fetch,
-      requestInit: { redirect: "error" },
+      requestInit: { redirect: "manual" },
     }),
   );
   try {

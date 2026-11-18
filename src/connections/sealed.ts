@@ -1,10 +1,13 @@
+import { Buffer } from "node:buffer";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { createKnownValueRedactor } from "../redaction.js";
 import { oauthBundleJson } from "./oauth.js";
 import {
   ConnectionsError,
   type Credential,
   type CustodyAdapter,
+  type CustodyObserver,
   type Placement,
 } from "./contract.js";
 
@@ -76,6 +79,68 @@ function authorized(
   return applyPlacement(request, "bearer", bundle.value.tokens.access_token);
 }
 
+/** Body framing that the redacted body no longer matches. */
+const bodyFraming = new Set(["content-length", "content-encoding"]);
+
+/**
+ * The upstream response with every echo of `secret` masked: in each encoding
+ * Veil's redactor registers, in headers (dropped) and across body chunks. The
+ * body is read as Latin-1, one code unit per byte, so the bytes around a
+ * masked value pass through unchanged. If the redactor cannot settle, the
+ * body errors rather than flush raw bytes.
+ */
+async function echoChecked(
+  response: Response,
+  secret: string,
+  observer: CustodyObserver | undefined,
+): Promise<Response> {
+  const redactor = createKnownValueRedactor([secret]);
+  let reported = false;
+  const report = () => {
+    if (reported) return;
+    reported = true;
+    observer?.echoed();
+  };
+  const headers = new Headers();
+  for (const [name, value] of response.headers) {
+    if (bodyFraming.has(name)) continue;
+    if (await redactor.contains(value)) report();
+    else headers.append(name, value);
+  }
+  if (response.body === null)
+    return new Response(null, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  const stream = redactor.stream();
+  const settle = (result: Awaited<ReturnType<typeof stream.write>>) => {
+    if (result.status === "unavailable")
+      throw new ConnectionsError("unavailable");
+    if (result.status === "redacted") report();
+    return Buffer.from(result.text, "latin1");
+  };
+  const body = response.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      async transform(chunk, controller) {
+        const settled = settle(
+          await stream.write(Buffer.from(chunk).toString("latin1")),
+        );
+        if (settled.byteLength > 0) controller.enqueue(settled);
+      },
+      async flush(controller) {
+        const settled = settle(await stream.finish());
+        if (settled.byteLength > 0) controller.enqueue(settled);
+      },
+    }),
+  );
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 /** Default custody: a thin adapter over the shared credential store. `send` is the checked public transport. */
 export function createSealedCustody(options: {
   vault: CredentialVault;
@@ -94,7 +159,7 @@ export function createSealedCustody(options: {
           ).credentialId,
         catch: refusal,
       }),
-    inject: (address, locator, request) =>
+    inject: (address, locator, request, observer) =>
       address.credential.kind === "none"
         ? Effect.tryPromise({
             try: () => options.send(request),
@@ -102,9 +167,15 @@ export function createSealedCustody(options: {
           })
         : Effect.tryPromise({
             try: () =>
-              options.vault.withSecret(locator, (secret) =>
-                options.send(authorized(address.credential, secret, request)),
-              ),
+              options.vault.withSecret(locator, async (secret) => {
+                const response = await options.send(
+                  authorized(address.credential, secret, request),
+                );
+                // A static secret is the value a bound host could echo back.
+                return address.credential.kind === "static"
+                  ? await echoChecked(response, secret, observer)
+                  : response;
+              }),
             catch: refusal,
           }),
     open: (_address, locator) =>

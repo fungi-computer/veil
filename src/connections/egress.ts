@@ -3,13 +3,32 @@ import ipaddr from "ipaddr.js";
 import { assertPublicHostName } from "../model-key-network.js";
 import type { createPublicEgressPolicy } from "../public-egress-policy.js";
 import {
+  connectionBodyLimit,
   ConnectionsError,
   type Tools,
   type HttpDestinations,
 } from "./contract.js";
 
-const bodyLimit = 256 * 1024;
 const owned = ["authorization", "proxy-authorization", "cookie"];
+/**
+ * Routing headers a guest may set to steer a CDN or proxy behind the bound
+ * host elsewhere (domain fronting): stripped, so the request goes only where
+ * its URL says. The platform sets Host from the URL.
+ */
+const routing = new Set([
+  "host",
+  "forwarded",
+  "via",
+  "x-real-ip",
+  "x-original-host",
+  "x-original-url",
+  "x-rewrite-url",
+  "x-host",
+  "true-client-ip",
+  "cf-connecting-ip",
+]);
+const isRouting = (name: string) =>
+  routing.has(name) || name.startsWith("x-forwarded-");
 const jsonValue = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Unknown),
 );
@@ -100,7 +119,8 @@ export async function admitRequest(
           );
   if (
     !inside ||
-    request.redirect !== "error" ||
+    // Workers refuse `redirect: "error"`; a manual hop's 3xx is refused by the owner.
+    request.redirect !== "manual" ||
     target.username ||
     target.password ||
     owned.some((name) => request.headers.has(name))
@@ -112,7 +132,16 @@ export async function admitRequest(
   } catch (cause) {
     throw new ConnectionsError("denied", { cause });
   }
-  if (request.body === null) return request;
+  const headers = new Headers(
+    [...request.headers].filter(([name]) => !isRouting(name)),
+  );
+  if (request.body === null)
+    return new Request(request.url, {
+      method: request.method,
+      headers,
+      redirect: request.redirect,
+      signal: request.signal,
+    });
   const bytes = await boundedBytes(request.clone());
   if (endpoint.kind === "mcp" && Array.isArray(tools)) {
     let name: string | null = null;
@@ -133,7 +162,7 @@ export async function admitRequest(
   }
   return new Request(request.url, {
     method: request.method,
-    headers: request.headers,
+    headers,
     body: bytes,
     redirect: request.redirect,
     signal: request.signal,
@@ -152,7 +181,7 @@ async function boundedBytes(
     const next = await reader?.read();
     if (next === undefined || next.done) break;
     size += next.value.byteLength;
-    if (size > bodyLimit) {
+    if (size > connectionBodyLimit) {
       await reader?.cancel();
       throw new ConnectionsError("too_large");
     }
