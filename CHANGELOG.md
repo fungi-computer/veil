@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.10.1
+
+### Patch Changes
+
+- Changes since 0.10.0:
+
+  - fix(oyster): keep build log redaction linear when secrets are frequent
+
 ## 0.10.0
 
 ### Minor Changes

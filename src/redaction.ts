@@ -35,8 +35,19 @@ export type KnownValueRedactor = Readonly<{
   stream: () => RedactionStream;
 }>;
 
+/** A half-open range of code units in the scanned text. */
+export type TextSpan = Readonly<{ start: number; end: number }>;
+
+/**
+ * One rule match. `secret` is the part redaction masks; `match` is the whole
+ * rule match around it, the context a rescan needs to find it again.
+ */
+export type PatternMatch = Readonly<{ match: TextSpan; secret: TextSpan }>;
+
 export type PatternRedactor = Readonly<{
   contains: (text: string) => boolean;
+  /** Every match, or undefined over the size ceiling (withhold the text). */
+  find: (text: string) => readonly PatternMatch[] | undefined;
   redact: (text: string) => RedactionResult;
 }>;
 
@@ -201,7 +212,10 @@ function allowed(
   );
 }
 
-function* patternMatches(text: string, config: PatternConfig) {
+function* patternMatches(
+  text: string,
+  config: PatternConfig,
+): Generator<PatternMatch> {
   const lower = text.toLowerCase();
   for (const rule of config.rules) {
     // pkcs12-file is filename-only. Its path is compiled and retained, but no
@@ -247,7 +261,10 @@ function* patternMatches(text: string, config: PatternConfig) {
         rule.allowlists.some((list) => allowed(list, secret, match, line))
       )
         continue;
-      yield { start: matcher.start(group), end: matcher.end(group) };
+      yield {
+        match: { start, end },
+        secret: { start: matcher.start(group), end: matcher.end(group) },
+      };
     }
   }
 }
@@ -269,22 +286,35 @@ export async function loadPatternRedactor(): Promise<PatternRedactor> {
     },
   );
   const config = await compiledPatterns;
+  const find = (text: string) =>
+    text.length > maxTextLength ? undefined : [...patternMatches(text, config)];
   return {
     contains: (text) =>
       text.length > maxTextLength || !patternMatches(text, config).next().done,
+    find,
     redact: (text) => {
-      if (text.length > maxTextLength)
+      const matches = find(text);
+      if (matches === undefined)
         return { text: unavailable, status: "unavailable" };
-      let marks: Uint8Array | undefined;
-      for (const match of patternMatches(text, config)) {
-        marks ??= new Uint8Array(text.length);
-        marks.fill(1, match.start, match.end);
-      }
-      return marks === undefined
+      return matches.length === 0
         ? { text, status: "clean" }
-        : { text: replaceMarked(text, marks), status: "redacted" };
+        : {
+            text: maskSpans(
+              text,
+              matches.map(({ secret }) => secret),
+            ),
+            status: "redacted",
+          };
     },
   };
+}
+
+/** Masks each span of `text`, unioning overlapping spans into one mask. */
+export function maskSpans(text: string, spans: readonly TextSpan[]): string {
+  if (spans.length === 0) return text;
+  const marks = new Uint8Array(text.length);
+  for (const { start, end } of spans) marks.fill(1, start, end);
+  return replaceMarked(text, marks);
 }
 
 /** A bitmap unions overlapping matches without rescanning replacement text. */

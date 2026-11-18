@@ -3,8 +3,11 @@ import {
   credentialUsableBy,
   loginAllowed,
   modelCredentialPermission,
+  permissionAllowsLogin,
   type CredentialHost,
   type CredentialMethod,
+  type CredentialPermission,
+  type CredentialScope,
 } from "../src/model-credentials.js";
 import {
   modelKeyBaseUrl,
@@ -32,7 +35,14 @@ it("records one per-provider policy for local and hosted credentials", () => {
     providerId: string,
     method: "api_key" | "subscription",
     host: "local" | "hosted",
-  ) => loginAllowed({ providerId, method, host, scope: "user" });
+  ) =>
+    loginAllowed({
+      providerId,
+      method,
+      host,
+      scope: "user",
+      source: "builtin",
+    });
   expect(allowed("anthropic", "api_key", "hosted")).toBe(true);
   expect(allowed("anthropic", "subscription", "local")).toBe(true);
   expect(allowed("anthropic", "subscription", "hosted")).toBe(false);
@@ -76,6 +86,7 @@ it("turns a provider's subscription off everywhere with its kill switch", () => 
           method: "subscription",
           host,
           scope: "user",
+          source: "builtin",
         },
         off,
       ),
@@ -87,6 +98,7 @@ it("turns a provider's subscription off everywhere with its kill switch", () => 
         method: "api_key",
         host: "hosted",
         scope: "user",
+        source: "builtin",
       },
       off,
     ),
@@ -102,6 +114,7 @@ it("never lets a subscription be Team-scoped, shared or pooled", () => {
           method: "subscription",
           host,
           scope: "team",
+          source: "builtin",
         }),
       ).toBe(false);
   expect(
@@ -110,6 +123,7 @@ it("never lets a subscription be Team-scoped, shared or pooled", () => {
       method: "api_key",
       host: "hosted",
       scope: "team",
+      source: "builtin",
     }),
   ).toBe(true);
 });
@@ -341,6 +355,7 @@ it("allows ChatGPT plan usage only for a local user's own subscription", () => {
     providerId: "openai",
     method: "subscription",
     scope: "user",
+    source: "builtin",
   } as const;
   expect(loginAllowed({ ...request, host: "local" })).toBe(true);
   expect(loginAllowed({ ...request, host: "hosted" })).toBe(false);
@@ -362,6 +377,7 @@ it("allows ChatGPT plan usage only for a local user's own subscription", () => {
         method: "api_key",
         scope: "user",
         host,
+        source: "builtin",
       }),
     ).toBe(true);
 });
@@ -376,9 +392,169 @@ it("keeps the retired Codex provider forbidden for every method and host", () =>
       ).toBe("forbidden");
       expect(
         loginAllowed(
-          { providerId: "openai-codex", method, host, scope: "user" },
+          {
+            providerId: "openai-codex",
+            method,
+            host,
+            scope: "user",
+            source: "builtin",
+          },
           {},
         ),
       ).toBe(false);
     }
+});
+
+const extensionSlot: CredentialPermission = {
+  status: "extension",
+  reason: "An installed extension may provide this sign-in",
+  source: "test",
+};
+
+it("lets a built-in login use only allowed and unreviewed local slots", () => {
+  const local = { host: "local", scope: "user", source: "builtin" } as const;
+  expect(permissionAllowsLogin({ status: "allowed" }, local)).toBe(true);
+  expect(permissionAllowsLogin({ status: "unreviewed" }, local)).toBe(true);
+  expect(permissionAllowsLogin(extensionSlot, local)).toBe(false);
+  expect(
+    permissionAllowsLogin(
+      { status: "forbidden", reason: "no", source: "test" },
+      local,
+    ),
+  ).toBe(false);
+  expect(
+    permissionAllowsLogin(
+      { status: "unreviewed" },
+      { ...local, host: "hosted" },
+    ),
+  ).toBe(false);
+});
+
+it("lets an extension fill only an extension or unreviewed slot, locally, for one person", () => {
+  const request = {
+    host: "local",
+    scope: "user",
+    source: "extension",
+  } as const;
+  expect(permissionAllowsLogin(extensionSlot, request)).toBe(true);
+  expect(permissionAllowsLogin({ status: "unreviewed" }, request)).toBe(true);
+  // A slot Fungi offers itself is never replaced by an extension.
+  expect(permissionAllowsLogin({ status: "allowed" }, request)).toBe(false);
+  expect(
+    permissionAllowsLogin(
+      { status: "forbidden", reason: "no", source: "test" },
+      request,
+    ),
+  ).toBe(false);
+  for (const permission of [extensionSlot, { status: "unreviewed" } as const]) {
+    expect(
+      permissionAllowsLogin(permission, { ...request, host: "hosted" }),
+    ).toBe(false);
+    expect(
+      permissionAllowsLogin(permission, { ...request, scope: "team" }),
+    ).toBe(false);
+  }
+});
+
+it("refuses an extension on every provider Fungi offers or forbids", () => {
+  const methods: readonly CredentialMethod[] = ["api_key", "subscription"];
+  const hosts: readonly CredentialHost[] = ["local", "hosted"];
+  const scopes: readonly CredentialScope[] = ["user", "team"];
+  for (const providerId of ["fungi", "openai-codex"])
+    for (const method of methods)
+      for (const host of hosts)
+        for (const scope of scopes)
+          expect(
+            loginAllowed(
+              { providerId, method, host, scope, source: "extension" },
+              {},
+            ),
+          ).toBe(false);
+  // Fungi offers these itself, so an extension may not take the slot.
+  for (const [providerId, method] of [
+    ["anthropic", "api_key"],
+    ["anthropic", "subscription"],
+    ["openai", "api_key"],
+    ["openai", "subscription"],
+    ["openrouter", "api_key"],
+    ["openai-compatible", "api_key"],
+  ] as const)
+    expect(
+      loginAllowed(
+        {
+          providerId,
+          method,
+          host: "local",
+          scope: "user",
+          source: "extension",
+        },
+        {},
+      ),
+    ).toBe(false);
+});
+
+it("allows an extension on an unreviewed local slot and nowhere else", () => {
+  const request = {
+    providerId: "github-copilot",
+    method: "subscription",
+    scope: "user",
+    source: "extension",
+  } as const;
+  expect(loginAllowed({ ...request, host: "local" })).toBe(true);
+  expect(loginAllowed({ ...request, host: "hosted" })).toBe(false);
+  expect(loginAllowed({ ...request, host: "local", scope: "team" })).toBe(
+    false,
+  );
+  expect(loginAllowed({ ...request, method: "api_key", host: "local" })).toBe(
+    true,
+  );
+  expect(
+    loginAllowed({
+      ...request,
+      method: "api_key",
+      host: "local",
+      scope: "team",
+    }),
+  ).toBe(false);
+});
+
+it("applies the subscription kill switch to an extension's login", () => {
+  const request = {
+    providerId: "github-copilot",
+    method: "subscription",
+    host: "local",
+    scope: "user",
+    source: "extension",
+  } as const;
+  expect(loginAllowed(request, {})).toBe(true);
+  expect(loginAllowed(request, { "github-copilot": true })).toBe(false);
+  expect(
+    loginAllowed({ ...request, method: "api_key" }, { "github-copilot": true }),
+  ).toBe(true);
+});
+
+it("changes no built-in decision when the source is builtin", () => {
+  const methods: readonly CredentialMethod[] = ["api_key", "subscription"];
+  const hosts: readonly CredentialHost[] = ["local", "hosted"];
+  const expected = {
+    // [api_key local, api_key hosted, subscription local, subscription hosted]
+    anthropic: [true, true, true, false],
+    openai: [true, true, true, false],
+    openrouter: [true, true, false, false],
+    "openai-compatible": [true, true, false, false],
+    fungi: [false, false, true, false],
+    "openai-codex": [false, false, false, false],
+    "some-new-provider": [true, false, true, false],
+  } satisfies Readonly<Record<string, readonly boolean[]>>;
+  for (const [providerId, decisions] of Object.entries(expected)) {
+    const actual = methods.flatMap((method) =>
+      hosts.map((host) =>
+        loginAllowed(
+          { providerId, method, host, scope: "user", source: "builtin" },
+          {},
+        ),
+      ),
+    );
+    expect([providerId, actual]).toEqual([providerId, decisions]);
+  }
 });

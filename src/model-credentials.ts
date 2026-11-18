@@ -7,7 +7,8 @@
  * hosted Fungi. A subscription is always one person's: never Team-scoped,
  * shared or pooled. `subscriptionKillSwitch` can turn off a provider if it
  * objects or blocks tokens. Hosted BYOK uses API keys. The retired Codex
- * provider is forbidden on both hosts.
+ * provider is forbidden on both hosts. An installed extension may fill a login
+ * slot Fungi does not offer itself, locally and for one person.
  * See wiki/3-resources/decisions/adr-byok-model-keys-v1.md.
  */
 
@@ -20,6 +21,11 @@ export type CredentialMethod = "api_key" | "subscription";
 export type CredentialPermission =
   | Readonly<{ status: "allowed" }>
   | Readonly<{ status: "forbidden"; reason: string; source: string }>
+  /**
+   * Fungi does not offer this built in; an installed extension may, locally,
+   * for one person.
+   */
+  | Readonly<{ status: "extension"; reason: string; source: string }>
   /** Not reviewed against the provider's terms: local status quo, never hosted. */
   | Readonly<{ status: "unreviewed" }>;
 
@@ -130,18 +136,52 @@ export function modelCredentialPermission(
 /** Who owns a credential: one Fungi user, or the whole Team. */
 export type CredentialScope = "user" | "team";
 
+/** Who supplies the login: Fungi itself, or an installed extension. */
+export type LoginSource = "builtin" | "extension";
+
 export type LoginRequest = Readonly<{
   providerId: string;
   method: CredentialMethod;
   host: CredentialHost;
   scope: CredentialScope;
+  source: LoginSource;
 }>;
+
+/**
+ * What one permission decides for a request's host, scope and source. A
+ * built-in login needs an `allowed` slot, or an `unreviewed` one locally. An
+ * extension login needs an `extension` slot, or an `unreviewed` one, and only
+ * locally for one person: it never fills an `allowed` slot, so no extension
+ * replaces a login Fungi offers.
+ */
+export function permissionAllowsLogin(
+  permission: CredentialPermission,
+  request: Pick<LoginRequest, "host" | "scope" | "source">,
+): boolean {
+  switch (permission.status) {
+    case "allowed":
+      return request.source === "builtin";
+    case "forbidden":
+      return false;
+    case "extension":
+      return (
+        request.source === "extension" &&
+        request.host === "local" &&
+        request.scope === "user"
+      );
+    case "unreviewed":
+      return (
+        request.host === "local" &&
+        (request.source === "builtin" || request.scope === "user")
+      );
+  }
+}
 
 /**
  * Whether this login may be offered or this credential attached. A
  * subscription belongs to one person: it is never Team-scoped, shared or
- * pooled, and a provider's kill switch turns it off. Unreviewed providers stay
- * local.
+ * pooled, and a provider's kill switch turns it off for either source.
+ * Unreviewed providers stay local.
  */
 export function loginAllowed(
   request: LoginRequest,
@@ -151,19 +191,10 @@ export function loginAllowed(
     if (request.scope !== "user") return false;
     if (killSwitch[request.providerId] === true) return false;
   }
-  const permission = modelCredentialPermission(
-    request.providerId,
-    request.method,
-    request.host,
+  return permissionAllowsLogin(
+    modelCredentialPermission(request.providerId, request.method, request.host),
+    request,
   );
-  switch (permission.status) {
-    case "allowed":
-      return true;
-    case "forbidden":
-      return false;
-    case "unreviewed":
-      return request.host === "local";
-  }
 }
 
 /** The owner recorded with a stored credential. */

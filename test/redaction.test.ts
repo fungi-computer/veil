@@ -8,6 +8,7 @@ import {
   createFingerprintSet,
   createKnownValueRedactor,
   loadPatternRedactor,
+  maskSpans,
   type KnownValueRedactor,
 } from "../src/redaction.js";
 import { renderRedactionRules } from "../scripts/generate-redaction-rules.mjs";
@@ -284,6 +285,12 @@ it("detects an unknown GitHub token in a paste without any stored value", async 
   const paste = `please use ${token} for this request`;
   expect(redactor.contains(paste)).toBe(true);
   expect(redactor.redact(paste).text).not.toContain(token);
+  const secret = {
+    start: paste.indexOf(token),
+    end: paste.indexOf(token) + token.length,
+  };
+  expect(redactor.find(paste)).toContainEqual({ match: secret, secret });
+  expect(maskSpans(paste, [secret])).toBe(redactor.redact(paste).text);
 });
 
 it("does not mistake Git SHAs, UUIDs or discussions of API keys for an unknown key", async () => {

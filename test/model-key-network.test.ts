@@ -187,6 +187,7 @@ it("offers Fungi only as a person's Local sign-in and honors its incident switch
       method: "subscription",
       host: "local",
       scope: "user",
+      source: "builtin",
     }),
   ).toBe(true);
   expect(
@@ -195,6 +196,7 @@ it("offers Fungi only as a person's Local sign-in and honors its incident switch
       method: "subscription",
       host: "local",
       scope: "team",
+      source: "builtin",
     }),
   ).toBe(false);
   expect(
@@ -203,6 +205,7 @@ it("offers Fungi only as a person's Local sign-in and honors its incident switch
       method: "subscription",
       host: "hosted",
       scope: "user",
+      source: "builtin",
     }),
   ).toBe(false);
   expect(
@@ -211,6 +214,7 @@ it("offers Fungi only as a person's Local sign-in and honors its incident switch
       method: "api_key",
       host: "local",
       scope: "user",
+      source: "builtin",
     }),
   ).toBe(false);
   expect(
@@ -220,6 +224,7 @@ it("offers Fungi only as a person's Local sign-in and honors its incident switch
         method: "subscription",
         host: "local",
         scope: "user",
+        source: "builtin",
       },
       subscriptionKillSwitchFrom("fungi"),
     ),
