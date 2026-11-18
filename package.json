@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
@@ -105,7 +105,8 @@
   "scripts": {
     "bench:redaction": "node --experimental-strip-types test/redaction.bench.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "pnpm run clean && node scripts/build-redaction-rules.mjs && tsc -p tsconfig.build.json",
+    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "generate:redaction-rules": "node scripts/generate-redaction-rules.mjs",
     "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\""
   },
   "dependencies": {

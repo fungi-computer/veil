@@ -19,7 +19,7 @@ import {
 } from "../src/connections/index.js";
 
 const base = "https://api.example.com/v1";
-const marker = "records-secret-0123456789"; //gitleaks:allow
+const marker = "records-fixture";
 const pet = {
   type: "object",
   properties: { id: { type: "string" }, name: { type: "string" } },

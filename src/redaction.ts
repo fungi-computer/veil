@@ -261,7 +261,7 @@ function* patternMatches(text: string, config: PatternConfig) {
 export async function loadPatternRedactor(): Promise<PatternRedactor> {
   // The rule table loads on first use, so a host that never scans pays no
   // startup heap for it. A failed load is retried on the next call.
-  compiledPatterns ??= import("../dist/redaction-rules.js").then(
+  compiledPatterns ??= import("./redaction-rules.generated.js").then(
     ({ configuration }) => patternConfig.parse(configuration),
     (cause: unknown) => {
       compiledPatterns = undefined;

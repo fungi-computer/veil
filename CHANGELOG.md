@@ -1,5 +1,14 @@
 # @fungi.computer/veil
 
+## 0.8.2
+
+### Patch Changes
+
+- Changes since 0.8.1:
+
+  - fix(veil): mark gitleaks rule patterns that match themselves
+  - fix(veil): commit the gitleaks rule table so captured Apps build
+
 ## 0.8.1
 
 ### Patch Changes

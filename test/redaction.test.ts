@@ -10,6 +10,7 @@ import {
   loadPatternRedactor,
   type KnownValueRedactor,
 } from "../src/redaction.js";
+import { renderRedactionRules } from "../scripts/generate-redaction-rules.mjs";
 
 const ownerKey = new Uint8Array(32).fill(7);
 const constructors = {
@@ -302,13 +303,22 @@ it("honors gitleaks entropy and content allowlists but not an untrusted allow co
   expect(redactor.redact(`api_key = "${token}"`).text).not.toContain(token);
 });
 
-it("rejects an unsupported upstream RE2 rule at build time and names its id", () => {
+it("commits the rule table the generator would write from vendor/gitleaks.toml now", async () => {
+  // Committed source, so a captured build (the App Publisher) compiles it.
+  const committed = readFileSync(
+    new URL("../src/redaction-rules.generated.ts", import.meta.url),
+    "utf8",
+  );
+  expect(await renderRedactionRules()).toBe(committed);
+});
+
+it("rejects an unsupported upstream RE2 rule at generation and names its id", () => {
   const source = readFileSync(
     new URL("../vendor/gitleaks.toml", import.meta.url),
     "utf8",
   );
   const build = new URL(
-    "../scripts/build-redaction-rules.mjs",
+    "../scripts/generate-redaction-rules.mjs",
     import.meta.url,
   );
   const result = spawnSync(process.execPath, [build.pathname, "--check"], {
