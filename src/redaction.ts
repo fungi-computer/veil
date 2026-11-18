@@ -1,7 +1,6 @@
 import { Buffer } from "node:buffer";
 import { RE2JS } from "re2js";
 import { z } from "zod";
-import { configuration } from "../dist/redaction-rules.js";
 import { VeilError } from "./index.js";
 
 /**
@@ -15,8 +14,8 @@ import { VeilError } from "./index.js";
  *   Session hosts only that set; {@link createFingerprintRedactor} matches it.
  *   {@link createKnownValueRedactor} is for owner-side doors that already hold
  *   the raw value at final send (echo checks); Session hosts never use it.
- * - Unknown keys (secondary). {@link createPatternRedactor} runs gitleaks'
- *   vendored default rules on RE2.
+ * - Unknown keys (secondary). {@link loadPatternRedactor} runs gitleaks'
+ *   vendored default rules on RE2, loading the rule table on first use.
  */
 export type RedactionResult = Readonly<{
   text: string;
@@ -154,7 +153,7 @@ const patternConfig = z.strictObject({
 });
 type PatternConfig = z.infer<typeof patternConfig>;
 type Allowlist = z.infer<typeof allowlist>;
-let compiledPatterns: PatternConfig | undefined;
+let compiledPatterns: Promise<PatternConfig> | undefined;
 
 function entropy(value: string): number {
   const counts = new Map<string, number>();
@@ -259,9 +258,17 @@ function* patternMatches(text: string, config: PatternConfig) {
  * and content allowlists. No filename/commit context or inline suppression comments
  * are trusted here. Unbounded pattern lengths cannot use known-value holdback.
  */
-export function createPatternRedactor(): PatternRedactor {
-  compiledPatterns ??= patternConfig.parse(configuration);
-  const config = compiledPatterns;
+export async function loadPatternRedactor(): Promise<PatternRedactor> {
+  // The rule table loads on first use, so a host that never scans pays no
+  // startup heap for it. A failed load is retried on the next call.
+  compiledPatterns ??= import("../dist/redaction-rules.js").then(
+    ({ configuration }) => patternConfig.parse(configuration),
+    (cause: unknown) => {
+      compiledPatterns = undefined;
+      throw cause;
+    },
+  );
+  const config = await compiledPatterns;
   return {
     contains: (text) =>
       text.length > maxTextLength || !patternMatches(text, config).next().done,

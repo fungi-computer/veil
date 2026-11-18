@@ -1,5 +1,15 @@
 # @fungi.computer/veil
 
+## 0.8.1
+
+### Patch Changes
+
+- Changes since 0.8.0:
+
+  - fix(veil): load the gitleaks rule table on first pattern scan
+
+- @fungi.computer/mycelium@0.4.7
+
 ## 0.8.0
 
 ### Minor Changes

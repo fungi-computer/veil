@@ -3,7 +3,7 @@ import {
   createFingerprintRedactor,
   createFingerprintSet,
   createKnownValueRedactor,
-  createPatternRedactor,
+  loadPatternRedactor,
   type RedactionResult,
 } from "@fungi.computer/veil/redaction";
 
@@ -15,7 +15,7 @@ const line =
 const text =
   line.repeat(Math.ceil(65536 / line.length)).slice(0, 65536 - secret.length) +
   secret;
-const patterns = createPatternRedactor();
+const patterns = await loadPatternRedactor();
 const fingerprints = await createFingerprintRedactor(
   await createFingerprintSet(new Uint8Array(32).fill(7), [secret]),
 );

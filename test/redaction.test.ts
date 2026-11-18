@@ -7,7 +7,7 @@ import {
   createFingerprintRedactor,
   createFingerprintSet,
   createKnownValueRedactor,
-  createPatternRedactor,
+  loadPatternRedactor,
   type KnownValueRedactor,
 } from "../src/redaction.js";
 
@@ -277,24 +277,24 @@ it("gives Session hosts no stored value and no key that can open the record", as
   );
 });
 
-it("detects an unknown GitHub token in a paste without any stored value", () => {
+it("detects an unknown GitHub token in a paste without any stored value", async () => {
   const token = ["ghp_", "7Zk9P2mQa4Wv6Xc8Bn0Ds3Fg5Hj1Lr9Ty2Ui"].join("");
-  const redactor = createPatternRedactor();
+  const redactor = await loadPatternRedactor();
   const paste = `please use ${token} for this request`;
   expect(redactor.contains(paste)).toBe(true);
   expect(redactor.redact(paste).text).not.toContain(token);
 });
 
-it("does not mistake Git SHAs, UUIDs or discussions of API keys for an unknown key", () => {
+it("does not mistake Git SHAs, UUIDs or discussions of API keys for an unknown key", async () => {
   const text =
     "API key setup 18c3145d6874aaf873cecb863c150da1b6e64ca0 6c72b8dc-4744-46da-a99a-d58db4290d48";
-  const redactor = createPatternRedactor();
+  const redactor = await loadPatternRedactor();
   expect(redactor.contains(text)).toBe(false);
   expect(redactor.redact(text)).toEqual({ text, status: "clean" });
 });
 
-it("honors gitleaks entropy and content allowlists but not an untrusted allow comment", () => {
-  const redactor = createPatternRedactor();
+it("honors gitleaks entropy and content allowlists but not an untrusted allow comment", async () => {
+  const redactor = await loadPatternRedactor();
   expect(redactor.contains(`ghp_${"a".repeat(36)}`)).toBe(false);
   expect(redactor.contains('api_key = "${MY_API_KEY}"')).toBe(false);
   const token = ["ghp_", "7Zk9P2mQa4Wv6Xc8Bn0Ds3Fg5Hj1Lr9Ty2Ui"].join("");
