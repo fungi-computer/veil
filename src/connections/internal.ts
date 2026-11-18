@@ -1,6 +1,11 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { ConnectionsError, credentialSchema, identifier } from "./contract.js";
+import {
+  ConnectionsError,
+  credentialSchema,
+  identifier,
+  destinationsSchema,
+} from "./contract.js";
 
 export const json = <S extends Schema.Top>(schema: S) =>
   Schema.fromJsonString(schema);
@@ -9,7 +14,8 @@ export const connectionRow = Schema.Struct({
   name: Schema.String,
   surface: json(
     Schema.Struct({
-      kind: Schema.Literals(["mcp", "openapi"]),
+      kind: Schema.Literals(["mcp", "openapi", "http"]),
+      destinations: Schema.optional(destinationsSchema),
       url: Schema.String,
       table: Schema.NullOr(Schema.Array(Schema.Unknown)),
       /** Digest of the decoded table, kept so listings need no decoding. */

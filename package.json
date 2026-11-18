@@ -1,12 +1,16 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.7.9",
+  "version": "0.8.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./redaction": {
+      "types": "./dist/redaction.d.ts",
+      "import": "./dist/redaction.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -94,29 +98,33 @@
   },
   "files": [
     "dist",
+    "vendor",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "bench:redaction": "node --experimental-strip-types test/redaction.bench.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "build": "pnpm run clean && node scripts/build-redaction-rules.mjs && tsc -p tsconfig.build.json",
     "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\""
   },
   "dependencies": {
     "@fungi.computer/cairn": "0.1.0",
-    "@fungi.computer/forage": "0.3.12",
-    "@fungi.computer/mycelium": "0.4.5",
+    "@fungi.computer/forage": "0.3.13",
+    "@fungi.computer/mycelium": "0.4.6",
     "@modelcontextprotocol/client": "2.0.0",
     "@nangohq/node": "0.71.6",
     "effect": "4.0.2",
     "http-parser-js": "0.5.10",
     "ipaddr.js": "2.2.0",
+    "re2js": "1.3.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@fungi.computer/watchdog": "0.1.4",
     "@modelcontextprotocol/server": "2.0.0",
     "@types/node": "24.13.3",
+    "smol-toml": "1.8.0",
     "typescript": "5.9.3",
     "vitest": "4.1.11"
   },

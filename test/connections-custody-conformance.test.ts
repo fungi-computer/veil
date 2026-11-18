@@ -452,14 +452,15 @@ describe("an authorization Nango runs", () => {
     expect(await code(h.connections.completeCustody(verified))).toBe("denied");
     const { grantVersion } = await run(
       h.connections.grant("owner", {
-        connectionId: h.started.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: h.started.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     const result = await run(
       h.connections.call(
-        "agent-a",
+        { kind: "agent", id: "agent-a" },
         { connectionId: h.started.connectionId, grantVersion },
         { operation: "listPets", input: {} },
       ),
@@ -501,15 +502,16 @@ describe("an authorization Nango runs", () => {
     await run(h.connections.completeCustody(verified));
     const { grantVersion } = await run(
       h.connections.grant("owner", {
-        connectionId: h.started.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: h.started.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     const call = (connections: typeof h.connections) =>
       code(
         connections.call(
-          "agent-a",
+          { kind: "agent", id: "agent-a" },
           { connectionId: h.started.connectionId, grantVersion },
           { operation: "listPets", input: {} },
         ),

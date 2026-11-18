@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { fromNodeSqlite } from "@fungi.computer/watchdog/node-sqlite";
 import {
   createCredentialSealer,
+  createOwnerCredentialSealer,
   createCredentialStore,
   CredentialError,
   type CredentialStorage,
@@ -10,6 +13,106 @@ import {
 const key = (fill: number) =>
   Buffer.from(new Uint8Array(32).fill(fill)).toString("base64url");
 const keyring = { activeKeyId: "k1", keys: { k1: key(1) } };
+
+describe("owner envelope custody", () => {
+  it("refuses copied ciphertext and copied wrapped keys under another owner", async () => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      const storage = fromNodeSqlite(database);
+      const options = { storage, domain: "test.vault", keyring };
+      const first = createOwnerCredentialSealer({
+        ...options,
+        ownerId: "team-a",
+      });
+      const other = createOwnerCredentialSealer({
+        ...options,
+        ownerId: "team-b",
+      });
+      const context = ["credential-1", "mcp"];
+      const sealed = await first.seal(context, "synthetic-private");
+      await other.seal(context, "different-private");
+      await expect(other.open(context, sealed)).rejects.toMatchObject({
+        code: "denied",
+      });
+      database.exec(
+        "UPDATE veil_credential_keys SET wrapped_key = (SELECT wrapped_key FROM veil_credential_keys WHERE owner_id = 'team-a') WHERE owner_id = 'team-b'",
+      );
+      await expect(other.open(context, sealed)).rejects.toMatchObject({
+        code: "denied",
+      });
+      await expect(
+        first.open(["credential-2", "mcp"], sealed),
+      ).rejects.toMatchObject({ code: "denied" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("deleting the owner data key disables every existing custody handle and record", async () => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      const options = {
+        storage: fromNodeSqlite(database),
+        domain: "test.vault",
+        ownerId: "team-a",
+        keyring,
+      };
+      const first = createOwnerCredentialSealer(options);
+      const other = createOwnerCredentialSealer(options);
+      const kinds = ["model-key/openai", "discord-bot", "mcp"];
+      const records = await Promise.all(
+        kinds.map((kind) => first.seal([kind], `synthetic-${kind}`)),
+      );
+      first.destroy();
+      for (const [index, sealed] of records.entries()) {
+        await expect(
+          other.open([kinds[index] ?? ""], sealed),
+        ).rejects.toMatchObject({ code: "denied" });
+      }
+      await first.seal(["new"], "new-private");
+      await expect(
+        first.open([kinds[0] ?? ""], records[0] ?? ""),
+      ).rejects.toMatchObject({ code: "denied" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rotates the wrapping key without rewriting credentials or retaining the old master key", async () => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      const storage = fromNodeSqlite(database);
+      const options = { storage, domain: "test.vault", ownerId: "team-a" };
+      const original = createOwnerCredentialSealer({ ...options, keyring });
+      const canary = `sk-test-VAULTCANARY-${crypto.randomUUID()}`;
+      const sealed = await original.seal(
+        ["credential-1", "model-key/openai"],
+        canary,
+      );
+      const rotating = createOwnerCredentialSealer({
+        ...options,
+        keyring: { activeKeyId: "k2", keys: { ...keyring.keys, k2: key(2) } },
+      });
+      await rotating.rewrap();
+      const reopened = createOwnerCredentialSealer({
+        ...options,
+        keyring: { activeKeyId: "k2", keys: { k2: key(2) } },
+      });
+      expect(
+        await reopened.open(["credential-1", "model-key/openai"], sealed),
+      ).toBe(canary);
+      const bytes = JSON.stringify(
+        database.prepare("SELECT * FROM veil_credential_keys").all(),
+      );
+      expect(bytes).not.toContain(canary);
+      expect(bytes).not.toContain(key(1));
+      expect(bytes).not.toContain(key(2));
+      expect(sealed).not.toContain(canary);
+    } finally {
+      database.close();
+    }
+  });
+});
 
 function memory(): CredentialStorage & { dump(): string } {
   const rows = new Map<string, StoredCredential>();

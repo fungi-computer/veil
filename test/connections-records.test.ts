@@ -121,7 +121,7 @@ function harness() {
     }),
     authorize: (actor) => actor === "owner",
     check: (grantor, grant, operation) => {
-      checks.push({ grantor, agentId: grant.agentId, operation });
+      checks.push({ grantor, subject: grant.subject, operation });
       return Promise.resolve(allowed);
     },
     clock: () => 1_000,
@@ -140,7 +140,12 @@ function harness() {
       }),
     );
     const { grantVersion } = await run(
-      connections.grant("owner", { connectionId, agentId: "agent-a", tools }),
+      connections.grant("owner", {
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
+        tools,
+      }),
     );
     return {
       connectionId,
@@ -219,8 +224,9 @@ describe("connection records", () => {
   it("swaps the table and the credential, cleaning the old secret", async () => {
     const h = harness();
     const { connectionId, ref } = await h.connect();
-    const before = (await h.run(h.connections.projection("agent-a")))
-      .connections[0];
+    const before = (
+      await h.run(h.connections.projection({ kind: "agent", id: "agent-a" }))
+    ).connections[0];
     const readOnly = (await table()).filter((op) => op.method === "GET");
     const next = await h.run(
       h.connections.update("owner", {
@@ -233,15 +239,16 @@ describe("connection records", () => {
       }),
     );
     expect(next.version).toBe(2);
-    const after = (await h.run(h.connections.projection("agent-a")))
-      .connections[0];
+    const after = (
+      await h.run(h.connections.projection({ kind: "agent", id: "agent-a" }))
+    ).connections[0];
     expect(
       after?.surface.kind === "openapi" && before?.surface.kind === "openapi"
         ? after.surface.digest !== before.surface.digest
         : false,
     ).toBe(true);
     await h.run(
-      h.connections.call("agent-a", ref, {
+      h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
         operation: "getPet",
         input: { id: "7" },
       }),
@@ -252,7 +259,7 @@ describe("connection records", () => {
     expect([...h.vault.values()]).toEqual(["rotated-secret-abcdef"]);
     expect(
       await code(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "createPet",
           input: { body: { name: "x" } },
         }),
@@ -309,45 +316,63 @@ describe("connection records", () => {
     const ref = (grantVersion: number) => ({ connectionId, grantVersion });
     const read = { operation: "getPet", input: { id: "1" } };
     const write = { operation: "createPet", input: { body: { name: "n" } } };
-    expect(await h.run(h.connections.call("agent-a", ref(1), read))).toEqual({
+    expect(
+      await h.run(
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref(1), read),
+      ),
+    ).toEqual({
       id: "1",
       name: "Rex",
     });
-    expect(await code(h.connections.call("agent-a", ref(1), write))).toBe(
-      "denied",
-    );
+    expect(
+      await code(
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref(1), write),
+      ),
+    ).toBe("denied");
     expect(h.sent).toHaveLength(1);
     // Raw egress cannot tell effects apart, so only an `all` grant may use it.
-    const raw = h.connections.egress("agent-a", ref(1));
+    const raw = h.connections.egress({ kind: "agent", id: "agent-a" }, ref(1));
     await expect(
       raw(new Request(`${base}/pets/1`, { redirect: "error" })),
     ).rejects.toMatchObject({ code: "denied" });
     const named = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["createPet"],
       }),
     );
     expect(
-      await code(h.connections.call("agent-a", ref(named.grantVersion), read)),
+      await code(
+        h.connections.call(
+          { kind: "agent", id: "agent-a" },
+          ref(named.grantVersion),
+          read,
+        ),
+      ),
     ).toBe("denied");
     expect(
       await h.run(
-        h.connections.call("agent-a", ref(named.grantVersion), write),
+        h.connections.call(
+          { kind: "agent", id: "agent-a" },
+          ref(named.grantVersion),
+          write,
+        ),
       ),
     ).toEqual({ id: "p1", name: "New" });
     const all = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     expect(
       (
         await h.connections.egress(
-          "agent-a",
+          { kind: "agent", id: "agent-a" },
           ref(all.grantVersion),
         )(new Request(`${base}/pets/2`, { redirect: "error" }))
       ).status,
@@ -366,8 +391,9 @@ describe("connection records", () => {
         .then(({ connectionId: id }) =>
           h.run(
             h.connections.grant("owner", {
-              connectionId: id,
-              agentId: "agent-a",
+              target: { kind: "connection", id: id },
+              subject: { kind: "agent", id: "agent-a" },
+              capability: "connector.call",
               tools: { effect: "read" },
             }),
           ),
@@ -379,7 +405,7 @@ describe("connection records", () => {
     const h = harness();
     const { ref } = await h.connect();
     await h.run(
-      h.connections.call("agent-a", ref, {
+      h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
         operation: "createPet",
         input: { body: { name: "n" } },
       }),
@@ -387,14 +413,14 @@ describe("connection records", () => {
     expect(h.checks).toEqual([
       {
         grantor: "owner",
-        agentId: "agent-a",
+        subject: { kind: "agent", id: "agent-a" },
         operation: { name: "createPet", effect: "write" },
       },
     ]);
     h.deny();
     expect(
       await code(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "getPet",
           input: { id: "1" },
         }),
@@ -408,7 +434,7 @@ describe("connection records", () => {
     const { ref } = await h.connect();
     expect(
       await code(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "getPet",
           input: { id: 7 },
         }),
@@ -416,7 +442,7 @@ describe("connection records", () => {
     ).toBe("invalid_input");
     expect(
       await code(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "getPet",
           input: { id: "../x" },
         }),
@@ -426,7 +452,7 @@ describe("connection records", () => {
     h.reply(() => Response.json({ id: "1", name: "Rex", secret: "extra" }));
     expect(
       await code(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "getPet",
           input: { id: "1" },
         }),
@@ -435,7 +461,7 @@ describe("connection records", () => {
     h.reply(() => new Response("{}", { status: 500 }));
     expect(
       await code(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "getPet",
           input: { id: "1" },
         }),
@@ -443,7 +469,7 @@ describe("connection records", () => {
     ).toBe("invalid_response");
     expect(
       await code(
-        h.connections.call("agent-b", ref, {
+        h.connections.call({ kind: "agent", id: "agent-b" }, ref, {
           operation: "getPet",
           input: { id: "1" },
         }),
@@ -456,11 +482,17 @@ describe("connection records", () => {
     await h.connect("pets", { effect: "read" });
     const source = connectionsSource({
       id: "test-connections",
-      read: () => Effect.runPromise(h.connections.projection("agent-a")),
+      read: () =>
+        Effect.runPromise(
+          h.connections.projection({ kind: "agent", id: "agent-a" }),
+        ),
       subscribe: () => () => undefined,
       call: (ref, operation, args) =>
         Effect.runPromise(
-          h.connections.call("agent-a", ref, { operation, input: args }),
+          h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
+            operation,
+            input: args,
+          }),
         ),
     });
     const acquired = await source.acquire({
@@ -530,7 +562,7 @@ describe("connection records", () => {
     ).toEqual({ id: "3", name: "Rex" });
     expect(h.checks.at(-1)).toEqual({
       grantor: "owner",
-      agentId: "owner:owner",
+      subject: null,
       operation: { name: "getPet", effect: "read" },
     });
     expect(
@@ -576,15 +608,16 @@ describe("connection records", () => {
     );
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     const ref = { connectionId, grantVersion };
     expect(
       await h.run(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "getPet",
           input: { id: "1" },
         }),
@@ -624,14 +657,18 @@ describe("connection records", () => {
         ),
     );
     const calling = code(
-      h.connections.call("agent-a", ref, {
+      h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
         operation: "getPet",
         input: { id: "1" },
       }),
     );
     await begun;
     await h.run(
-      h.connections.ungrant("owner", { connectionId, agentId: "agent-a" }),
+      h.connections.ungrant("owner", {
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
+      }),
     );
     release();
     expect(await calling).toBe("revoked");
@@ -646,7 +683,7 @@ describe("connection records", () => {
       onSkipped: (id) => skipped.push(id),
       read: async () => {
         const projection = await Effect.runPromise(
-          h.connections.projection("agent-a"),
+          h.connections.projection({ kind: "agent", id: "agent-a" }),
         );
         return {
           ...projection,
@@ -708,8 +745,9 @@ describe("connection records", () => {
     );
     await Effect.runPromise(
       connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );

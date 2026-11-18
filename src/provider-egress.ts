@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { VeilError } from "./index.js";
+import { createKnownValueRedactor } from "./redaction.js";
 
 /**
  * Provider egress, `veil.fetch` for Fungi's own platform keys (V1b). The Hub
@@ -88,6 +89,7 @@ const VEIL_OWNED_BINDINGS: ReadonlySet<string> = new Set([
   "WEBHOOK_TRIGGER_MASTER_KEY",
   "OPENAPI_CREDENTIAL_MASTER_KEY",
   "OPENAPI_CREDENTIAL_KEY_ID",
+  "OPENAPI_CREDENTIAL_PREVIOUS_KEYS",
   "NANGO_SERVER_URL",
   "NANGO_API_KEY",
   "NANGO_WEBHOOK_SIGNING_KEY",
@@ -351,9 +353,7 @@ async function fetchFixed(
     const text = await boundedText(response, 64 * 1024 * 1024);
     if (
       key !== undefined &&
-      [key, encodeURIComponent(key), JSON.stringify(key).slice(1, -1)].some(
-        (echo) => text.includes(echo),
-      )
+      (await createKnownValueRedactor([key]).contains(text))
     )
       throw new VeilError("unavailable");
     return new Response(text, {

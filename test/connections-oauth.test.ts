@@ -243,8 +243,9 @@ function harness(ownerId = "owner-1") {
     await run(connections.complete("owner", approval));
     const { grantVersion } = await run(
       connections.grant("owner", {
-        connectionId: started.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: started.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
@@ -313,13 +314,15 @@ describe("oauth connections", () => {
     // Nothing is usable until the callback settles the attempt.
     await h.run(
       h.connections.grant("owner", {
-        connectionId: started.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: started.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     expect(
-      (await h.run(h.connections.projection("agent-a"))).connections,
+      (await h.run(h.connections.projection({ kind: "agent", id: "agent-a" })))
+        .connections,
     ).toEqual([]);
     await h.run(
       h.connections.complete(
@@ -327,13 +330,18 @@ describe("oauth connections", () => {
         h.remote.approve(started.authorizeUrl ?? ""),
       ),
     );
-    const projection = await h.run(h.connections.projection("agent-a"));
+    const projection = await h.run(
+      h.connections.projection({ kind: "agent", id: "agent-a" }),
+    );
     const ref = projection.connections[0];
     expect(ref?.surface.kind).toBe("mcp");
-    const egress = h.connections.egress("agent-a", {
-      connectionId: started.connectionId,
-      grantVersion: ref?.grantVersion ?? 0,
-    });
+    const egress = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId: started.connectionId,
+        grantVersion: ref?.grantVersion ?? 0,
+      },
+    );
     expect(await h.tools(egress)).toEqual(["ping"]);
     for (const secret of ["access-1", "refresh-1"]) {
       expect(h.dump()).not.toContain(secret);
@@ -411,10 +419,13 @@ describe("oauth connections", () => {
   it("refreshes exactly once across concurrent 401s and persists the rotated token", async () => {
     const h = harness();
     const connected = await h.connect();
-    const egress = h.connections.egress("agent-a", {
-      connectionId: connected.connectionId,
-      grantVersion: connected.grantVersion,
-    });
+    const egress = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId: connected.connectionId,
+        grantVersion: connected.grantVersion,
+      },
+    );
     const before = [...h.vault.keys()];
     h.remote.expireAccessTokens();
     const answers = await Promise.all(
@@ -451,10 +462,13 @@ describe("oauth connections", () => {
     const h = harness();
     h.remote.shortLived(60);
     const connected = await h.connect();
-    const egress = h.connections.egress("agent-a", {
-      connectionId: connected.connectionId,
-      grantVersion: connected.grantVersion,
-    });
+    const egress = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId: connected.connectionId,
+        grantVersion: connected.grantVersion,
+      },
+    );
     h.advance(45_000);
     expect(await h.tools(egress)).toEqual(["ping"]);
     expect(h.remote.stats.refreshes).toBe(1);
@@ -471,10 +485,13 @@ describe("oauth connections", () => {
   it("does not reactivate a connection revoked during a refresh", async () => {
     const h = harness();
     const connected = await h.connect();
-    const egress = h.connections.egress("agent-a", {
-      connectionId: connected.connectionId,
-      grantVersion: connected.grantVersion,
-    });
+    const egress = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId: connected.connectionId,
+        grantVersion: connected.grantVersion,
+      },
+    );
     h.remote.expireAccessTokens();
     const release = h.remote.holdTokens();
     const pending = code(h.tools(egress));

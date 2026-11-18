@@ -10,6 +10,10 @@ import {
   draftSchema,
   egressRefSchema,
   grantInputSchema,
+  subjectSchema,
+  targetSchema,
+  connectionCapabilitySchema,
+  usageEventSchema,
   identifier,
   toolsSchema,
   type CallInput,
@@ -22,9 +26,14 @@ import {
   type CustodyAddress,
   type EgressRef,
   type NarrowFetch,
+  type ConnectionSubject,
+  type ConnectionTarget,
+  type ConnectionUsage,
+  type UsageEvent,
+  type HttpDestinations,
   type SurfaceView,
 } from "./contract.js";
-import { admitRequest } from "./egress.js";
+import { admitRequest, validateDestinations } from "./egress.js";
 import {
   admits,
   boundedText,
@@ -49,10 +58,12 @@ import {
 import { createOAuthFlow, type OAuthStore } from "./oauth-flow.js";
 import { listMcpTools } from "./discover.js";
 import { createUpdate } from "./update.js";
+import { migrateSubjectGrants } from "./migrations/001-subject-grants.js";
 
 const grantRow = Schema.Struct({
-  connectionId: identifier,
-  agentId: identifier,
+  target: json(targetSchema),
+  subject: json(subjectSchema),
+  capability: connectionCapabilitySchema,
   tools: json(toolsSchema),
   grantor: identifier,
   version: Schema.Number,
@@ -78,6 +89,7 @@ export function createConnections(options: ConnectionsOptions) {
   const transactionSync = <A>(body: () => A) =>
     options.store.transactionSync(body);
   const policy = createPublicEgressPolicy(options.egressPolicy);
+  migrateSubjectGrants(options.store);
   sql.exec(`
     CREATE TABLE IF NOT EXISTS veil_connection_attempts (
       state TEXT PRIMARY KEY, connectionId TEXT NOT NULL, actor TEXT NOT NULL,
@@ -87,12 +99,15 @@ export function createConnections(options: ConnectionsOptions) {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, surface TEXT NOT NULL, credential TEXT NOT NULL,
       locator TEXT, state TEXT NOT NULL, authorityVersion INTEGER NOT NULL,
       version INTEGER NOT NULL) STRICT;
-    CREATE TABLE IF NOT EXISTS veil_connection_grants (
-      connectionId TEXT NOT NULL, agentId TEXT NOT NULL, tools TEXT NOT NULL,
-      grantor TEXT NOT NULL, version INTEGER NOT NULL, active INTEGER NOT NULL,
-      PRIMARY KEY (connectionId, agentId)) STRICT;
     CREATE TABLE IF NOT EXISTS veil_connection_receipts (
       requestId TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS veil_connection_usage (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT, connectionId TEXT NOT NULL,
+      coalesceKey TEXT NOT NULL, firstAt INTEGER NOT NULL, lastAt INTEGER NOT NULL,
+      uses INTEGER NOT NULL, protected INTEGER NOT NULL, record TEXT NOT NULL) STRICT;
+    CREATE INDEX IF NOT EXISTS veil_connection_usage_resource ON veil_connection_usage(connectionId, sequence);
+    CREATE INDEX IF NOT EXISTS veil_connection_usage_coalesce ON veil_connection_usage(coalesceKey, firstAt);
+    CREATE INDEX IF NOT EXISTS veil_connection_usage_age ON veil_connection_usage(protected, lastAt, sequence);
     CREATE TABLE IF NOT EXISTS veil_connection_cleanup (
       id INTEGER PRIMARY KEY AUTOINCREMENT, connectionId TEXT NOT NULL, locator TEXT NOT NULL,
       credential TEXT NOT NULL, attempts INTEGER NOT NULL) STRICT;
@@ -154,18 +169,116 @@ export function createConnections(options: ConnectionsOptions) {
     if (taken === undefined || taken.n > 0)
       throw new ConnectionsError("conflict");
   };
-  const grant = (id: string, agentId: string) =>
+  const targetOf = (row: ConnectionRow): ConnectionTarget => ({
+    kind: row.surface.kind === "http" ? "secret" : "connection",
+    id: row.id,
+  });
+  const subjectKey = (subject: ConnectionSubject) =>
+    JSON.stringify(decode(subjectSchema, subject));
+  const targetKey = (target: ConnectionTarget) =>
+    JSON.stringify(decode(targetSchema, target));
+  const grant = (id: string, subject: ConnectionSubject) =>
     rows(
       grantRow,
-      "SELECT * FROM veil_connection_grants WHERE connectionId = ? AND agentId = ?",
-      id,
-      agentId,
+      "SELECT * FROM veil_connection_grants WHERE target = ? AND subject = ? AND capability = ?",
+      targetKey(targetOf(connection(id))),
+      subjectKey(subject),
+      connection(id).surface.kind === "http" ? "secret.use" : "connector.call",
     )[0];
   const address = (row: ConnectionRow): CustodyAddress => ({
     ownerId,
     connectionId: row.id,
     credential: row.credential,
   });
+  /**
+   * Usage audit policy (CTO ADR #1008): 90-day retention, identical uses
+   * within one minute coalesced, at most 250,000 rows per owner pruned oldest
+   * first. A refusal younger than the retention is never pruned, so young
+   * refusals may hold an owner above the cap until they age out. A use whose
+   * row cannot be written is refused: nothing is sent unaudited.
+   */
+  const auditRetentionMs = 90 * 24 * 60 * 60 * 1_000;
+  const auditCoalesceMs = 60_000;
+  const auditOwnerRowLimit = 250_000;
+  /** Private response ceiling for one listing, newest rows first kept. */
+  const auditListLimit = 1_000;
+  const expireAudit = (now: number) => {
+    sql.exec(
+      "DELETE FROM veil_connection_usage WHERE lastAt <= ?",
+      now - auditRetentionMs,
+    );
+  };
+  const auditRows = () =>
+    rows(count, "SELECT COUNT(*) AS n FROM veil_connection_usage")[0]?.n ?? 0;
+  const writeAudit = (event: UsageEvent) => {
+    transactionSync(() => {
+      const now = options.clock();
+      const stored = decode(usageEventSchema, event);
+      // Identical uses differ only by request; the row keeps the first one's.
+      const key = JSON.stringify({ ...stored, requestId: null });
+      expireAudit(now);
+      const coalesced = sql
+        .exec(
+          "UPDATE veil_connection_usage SET lastAt = ?, uses = uses + 1 WHERE sequence = (SELECT sequence FROM veil_connection_usage WHERE coalesceKey = ? AND firstAt > ? ORDER BY sequence DESC LIMIT 1) RETURNING sequence",
+          now,
+          key,
+          now - auditCoalesceMs,
+        )
+        .toArray();
+      if (coalesced.length !== 0) return;
+      const excess = auditRows() - auditOwnerRowLimit + 1;
+      // After expiry every remaining refusal is younger than the retention.
+      if (excess > 0)
+        sql.exec(
+          "DELETE FROM veil_connection_usage WHERE sequence IN (SELECT sequence FROM veil_connection_usage WHERE protected = 0 ORDER BY lastAt, sequence LIMIT ?)",
+          excess,
+        );
+      sql.exec(
+        "INSERT INTO veil_connection_usage (connectionId, coalesceKey, firstAt, lastAt, uses, protected, record) VALUES (?, ?, ?, ?, 1, ?, ?)",
+        stored.connectionId,
+        key,
+        now,
+        now,
+        stored.outcome === "refused_destination" ||
+          stored.outcome === "refused_grant"
+          ? 1
+          : 0,
+        JSON.stringify(stored),
+      );
+    });
+  };
+  const auditRow = Schema.Struct({
+    record: json(usageEventSchema),
+    firstAt: Schema.Number,
+    lastAt: Schema.Number,
+    uses: Schema.Number,
+  });
+  const audit = (actor: string, connectionId: string) =>
+    sync(() =>
+      transactionSync(() => {
+        authorize(actor, "manage");
+        decode(identifier, connectionId);
+        expireAudit(options.clock());
+        return rows(
+          auditRow,
+          "SELECT record, firstAt, lastAt, uses FROM (SELECT * FROM veil_connection_usage WHERE connectionId = ? ORDER BY sequence DESC LIMIT ?) ORDER BY sequence",
+          connectionId,
+          auditListLimit,
+        ).map((row): ConnectionUsage => ({
+          ...row.record,
+          firstAt: row.firstAt,
+          lastAt: row.lastAt,
+          count: row.uses,
+        }));
+      }),
+    );
+
+  /** The first bound host stands for an HTTP secret where one origin is needed. */
+  const firstHost = (destinations: HttpDestinations) => {
+    const host = destinations[0]?.host;
+    if (host === undefined) throw new ConnectionsError("invalid_input");
+    return host;
+  };
 
   /** The surface URL must be public https with nothing the owner did not choose to send. */
   const publicUrl = (value: string) => {
@@ -211,7 +324,11 @@ export function createConnections(options: ConnectionsOptions) {
       draft.name,
       draft.label ?? null,
       draft.surface.kind,
-      "url" in draft.surface ? draft.surface.url : draft.surface.baseUrl,
+      draft.surface.kind === "http"
+        ? draft.surface.destinations
+        : "url" in draft.surface
+          ? draft.surface.url
+          : draft.surface.baseUrl,
       draft.credential,
       draft.secret !== undefined,
     ]);
@@ -221,6 +338,11 @@ export function createConnections(options: ConnectionsOptions) {
       const draft = yield* sync(() => {
         authorize(actor, "manage");
         const parsed = decode(draftSchema, input);
+        if (parsed.surface.kind === "http") {
+          if (parsed.credential.kind !== "static")
+            throw new ConnectionsError("invalid_input");
+          validateDestinations(parsed.surface.destinations);
+        }
         const wantsSecret =
           parsed.credential.kind === "static"
             ? "required"
@@ -272,9 +394,11 @@ export function createConnections(options: ConnectionsOptions) {
       });
       const endpoint = yield* sync(() =>
         publicUrl(
-          draft.surface.kind === "openapi"
-            ? draft.surface.baseUrl
-            : draft.surface.url,
+          draft.surface.kind === "http"
+            ? `https://${firstHost(draft.surface.destinations)}/`
+            : draft.surface.kind === "openapi"
+              ? draft.surface.baseUrl
+              : draft.surface.url,
         ),
       );
       // A provider's credential is sent only to the origins its operator declared.
@@ -302,7 +426,7 @@ export function createConnections(options: ConnectionsOptions) {
               endpoint,
               fingerprint(draft),
               table,
-              draft.surface.kind,
+              draft.surface.kind === "mcp" ? "mcp" : "openapi",
             )
           : oauthFlow.begin(
               actor,
@@ -330,6 +454,13 @@ export function createConnections(options: ConnectionsOptions) {
         draft.secret === undefined
           ? null
           : yield* options.custody.put(addr, draft.secret);
+      const storedSurface: ConnectionRow["surface"] = {
+        kind: draft.surface.kind,
+        url: endpoint,
+        table: decoded?.operations ?? null,
+        digest: decoded?.digest ?? null,
+        label: draft.label ?? draft.name,
+      };
       const stored: ConnectionRow = {
         id: connectionId,
         name: draft.name,
@@ -338,13 +469,10 @@ export function createConnections(options: ConnectionsOptions) {
         state: "active",
         authorityVersion: 1,
         version: 1,
-        surface: {
-          kind: draft.surface.kind,
-          url: endpoint,
-          table: decoded?.operations ?? null,
-          digest: decoded?.digest ?? null,
-          label: draft.label ?? draft.name,
-        },
+        surface:
+          draft.surface.kind === "http"
+            ? { ...storedSurface, destinations: draft.surface.destinations }
+            : storedSurface,
       };
       return yield* sync(() =>
         transactionSync(() => {
@@ -557,7 +685,18 @@ export function createConnections(options: ConnectionsOptions) {
       transactionSync(() => {
         authorize(actor, "manage");
         const wanted = decode(grantInputSchema, input);
-        const row = connection(wanted.connectionId);
+        const row = connection(wanted.target.id);
+        if (
+          wanted.target.kind !== targetOf(row).kind ||
+          wanted.capability !==
+            (row.surface.kind === "http" ? "secret.use" : "connector.call") ||
+          (row.surface.kind === "http" && wanted.tools !== "all") ||
+          (row.surface.kind !== "http" && wanted.subject.kind !== "agent")
+        )
+          throw new ConnectionsError("invalid_input");
+        // The Vault adds no App power until that is decided (ADR adr-vault-v1).
+        if (wanted.capability === "secret.use" && wanted.subject.kind === "app")
+          throw new ConnectionsError("unsupported");
         if (row.state === "revoked") throw new ConnectionsError("revoked");
         if (
           wanted.tools !== "all" &&
@@ -567,15 +706,16 @@ export function createConnections(options: ConnectionsOptions) {
         )
           throw new ConnectionsError("invalid_input");
         const tools = JSON.stringify(wanted.tools);
-        const existing = grant(wanted.connectionId, wanted.agentId);
+        const existing = grant(wanted.target.id, wanted.subject);
         if (existing?.active === 1 && JSON.stringify(existing.tools) === tools)
           return { grantVersion: existing.version };
         const next = (existing?.version ?? 0) + 1;
         sql.exec(
-          `INSERT INTO veil_connection_grants VALUES (?, ?, ?, ?, ?, 1)
-           ON CONFLICT (connectionId, agentId) DO UPDATE SET tools = excluded.tools, grantor = excluded.grantor, version = excluded.version, active = 1`,
-          wanted.connectionId,
-          wanted.agentId,
+          `INSERT INTO veil_connection_grants VALUES (?, ?, ?, ?, ?, ?, 1)
+           ON CONFLICT (target, subject, capability) DO UPDATE SET tools = excluded.tools, grantor = excluded.grantor, version = excluded.version, active = 1`,
+          targetKey(wanted.target),
+          subjectKey(wanted.subject),
+          wanted.capability,
           tools,
           actor,
           next,
@@ -585,23 +725,30 @@ export function createConnections(options: ConnectionsOptions) {
       }),
     );
 
-  const ungrant = (
-    actor: string,
-    input: { connectionId: string; agentId: string },
-  ) =>
+  const ungrant = (actor: string, input: Omit<GrantInput, "tools">) =>
     sync(() => {
       transactionSync(() => {
         authorize(actor, "manage");
         const wanted = decode(
-          Schema.Struct({ connectionId: identifier, agentId: identifier }),
+          Schema.Struct({
+            target: targetSchema,
+            subject: subjectSchema,
+            capability: connectionCapabilitySchema,
+          }),
           input,
         );
-        const existing = grant(wanted.connectionId, wanted.agentId);
-        if (existing?.active !== 1) return;
+        const existing = grant(wanted.target.id, wanted.subject);
+        if (
+          existing?.capability !== wanted.capability ||
+          existing.target.kind !== wanted.target.kind
+        )
+          return;
+        if (existing.active !== 1) return;
         sql.exec(
-          "UPDATE veil_connection_grants SET active = 0, version = version + 1 WHERE connectionId = ? AND agentId = ?",
-          wanted.connectionId,
-          wanted.agentId,
+          "UPDATE veil_connection_grants SET active = 0, version = version + 1 WHERE target = ? AND subject = ? AND capability = ?",
+          targetKey(wanted.target),
+          subjectKey(wanted.subject),
+          wanted.capability,
         );
         bump();
       });
@@ -625,8 +772,8 @@ export function createConnections(options: ConnectionsOptions) {
             row.id,
           );
           sql.exec(
-            "UPDATE veil_connection_grants SET active = 0, version = version + 1 WHERE connectionId = ? AND active = 1",
-            row.id,
+            "UPDATE veil_connection_grants SET active = 0, version = version + 1 WHERE target = ? AND active = 1",
+            targetKey(targetOf(row)),
           );
           enqueueCleanup(row);
           bump();
@@ -635,10 +782,10 @@ export function createConnections(options: ConnectionsOptions) {
       yield* sweep();
     });
 
-  const projection = (agentId: string) =>
+  const projection = (subject: ConnectionSubject) =>
     Effect.gen(function* () {
       const stored = yield* sync(() => {
-        decode(identifier, agentId);
+        const key = subjectKey(subject);
         const revision =
           rows(
             Schema.Struct({ revision: Schema.Number }),
@@ -646,19 +793,24 @@ export function createConnections(options: ConnectionsOptions) {
           )[0]?.revision ?? 1;
         const granted = rows(
           grantRow,
-          "SELECT * FROM veil_connection_grants WHERE agentId = ? AND active = 1",
-          agentId,
+          "SELECT * FROM veil_connection_grants WHERE subject = ? AND active = 1",
+          key,
         );
         return {
           revision,
           granted: granted
-            .map((g) => ({ g, row: connection(g.connectionId) }))
+            .map((g) => ({ g, row: connection(g.target.id) }))
             .filter(({ row }) => row.state === "active"),
         };
       });
       const connections = [];
       for (const { g, row } of stored.granted) {
         let surface: SurfaceView = { kind: "mcp", url: row.surface.url };
+        if (row.surface.kind === "http") {
+          if (row.surface.destinations === undefined)
+            return yield* Effect.fail(new ConnectionsError("invalid_input"));
+          surface = { kind: "http", destinations: row.surface.destinations };
+        }
         if (row.surface.kind === "openapi") {
           const decoded = yield* io(() => decodeTable(row.surface.table));
           surface = {
@@ -690,39 +842,54 @@ export function createConnections(options: ConnectionsOptions) {
       return rows(
         connectionRow,
         "SELECT * FROM veil_connections ORDER BY id",
-      ).map((row): ConnectionView => ({
-        connectionId: row.id,
-        name: row.name,
-        label: row.surface.label ?? row.name,
-        surface: {
+      ).map((row): ConnectionView => {
+        const surface: ConnectionView["surface"] = {
           kind: row.surface.kind,
           origin: new URL(row.surface.url).origin,
           url: row.surface.url,
           digest: row.surface.digest ?? null,
-        },
-        credentialKind: row.credential.kind,
-        credential: row.credential,
-        state: row.state,
-        version: row.version,
-        authorityVersion: row.authorityVersion,
-        grants: rows(
-          grantRow,
-          "SELECT * FROM veil_connection_grants WHERE connectionId = ? AND active = 1",
-          row.id,
-        ).map((g) => ({
-          agentId: g.agentId,
-          tools: g.tools,
-          version: g.version,
-          grantor: g.grantor,
-        })),
-      }));
+        };
+        return {
+          connectionId: row.id,
+          name: row.name,
+          label: row.surface.label ?? row.name,
+          surface:
+            row.surface.destinations === undefined
+              ? surface
+              : { ...surface, destinations: row.surface.destinations },
+          credentialKind: row.credential.kind,
+          credential: row.credential,
+          state: row.state,
+          version: row.version,
+          authorityVersion: row.authorityVersion,
+          grants: rows(
+            grantRow,
+            "SELECT * FROM veil_connection_grants WHERE target = ? AND active = 1",
+            targetKey(targetOf(row)),
+          ).map((g) => ({
+            subject: g.subject,
+            target: g.target,
+            capability: g.capability,
+            tools: g.tools,
+            version: g.version,
+            grantor: g.grantor,
+          })),
+        };
+      });
     });
 
+  /** One admitted send: whose grant stands behind it, or null for the owner itself. */
+  type Admission = Readonly<{
+    row: ConnectionRow;
+    tools: Tools;
+    grantor: string;
+    subject: ConnectionSubject | null;
+  }>;
   /** The grant, the connection and the grantor must all still stand. */
-  const admitted = (agentId: string, ref: EgressRef) => {
-    decode(identifier, agentId);
+  const admitted = (subject: ConnectionSubject, ref: EgressRef): Admission => {
+    decode(subjectSchema, subject);
     const row = connection(ref.connectionId);
-    const held = grant(ref.connectionId, agentId);
+    const held = grant(ref.connectionId, subject);
     if (
       row.state === "revoked" ||
       held?.active !== 1 ||
@@ -733,7 +900,12 @@ export function createConnections(options: ConnectionsOptions) {
     if (row.state === "reconnect_required")
       throw new ConnectionsError("reconnect_required");
     authorize(held.grantor, "grantor");
-    return { row, tools: held.tools, grantor: held.grantor, agentId };
+    return {
+      row,
+      tools: held.tools,
+      grantor: held.grantor,
+      subject: held.subject,
+    };
   };
 
   /**
@@ -755,15 +927,26 @@ export function createConnections(options: ConnectionsOptions) {
       }>,
       ConnectionsError
     >,
+    beforeSend?: () => void,
   ) =>
     Effect.gen(function* () {
-      const { row, tools, grantor, agentId } = yield* sync(admit);
+      const { row, tools, grantor, subject } = yield* sync(admit);
       const { request, operation } = yield* prepare(row, tools);
       const verdict = options.check;
       if (
         verdict !== undefined &&
         !(yield* io(() =>
-          verdict(grantor, { agentId, connectionId: row.id, tools }, operation),
+          verdict(
+            grantor,
+            {
+              subject,
+              target: targetOf(row),
+              capability:
+                row.surface.kind === "http" ? "secret.use" : "connector.call",
+              tools,
+            },
+            operation,
+          ),
         ))
       )
         return yield* Effect.fail(new ConnectionsError("denied"));
@@ -773,6 +956,7 @@ export function createConnections(options: ConnectionsOptions) {
       });
       if (row.locator === null && row.credential.kind === "static")
         return yield* Effect.fail(new ConnectionsError("denied"));
+      if (beforeSend !== undefined) yield* sync(beforeSend);
       const response =
         yield* // A custodian that runs the sign-in refreshes the token itself.
         (
@@ -808,27 +992,148 @@ export function createConnections(options: ConnectionsOptions) {
     admit: () => ReturnType<typeof admitted>,
     target: Parameters<NarrowFetch>[0],
     init: Parameters<NarrowFetch>[1],
+    usage?: Readonly<{ subject: ConnectionSubject; ref: EgressRef }>,
   ) =>
     Effect.runPromise(
-      deliver(admit, (row, tools) => {
-        const { kind, url } = row.surface;
-        return kind === "openapi" && tools !== "all"
-          ? // Effect and name grants are enforced per operation, by `call`.
-            Effect.fail(new ConnectionsError("denied"))
-          : io(() =>
-              admitRequest(
-                { kind, url },
-                tools,
-                new Request(target, init),
-                policy,
-              ),
-            ).pipe(Effect.map((request) => ({ request, operation: null })));
+      Effect.gen(function* () {
+        let phase: "grant" | "destination" | "upstream" = "grant";
+        let status: number | null = null;
+        const observed =
+          usage === undefined
+            ? null
+            : yield* sync(() => {
+                const row = connection(usage.ref.connectionId);
+                if (row.surface.kind !== "http") return null;
+                const subject = decode(subjectSchema, usage.subject);
+                const targetUrl = URL.parse(
+                  target instanceof Request ? target.url : String(target),
+                );
+                const host =
+                  row.surface.destinations?.find(
+                    (rule) => rule.host === targetUrl?.hostname,
+                  )?.host ?? null;
+                const path = targetUrl?.pathname ?? "/";
+                const method =
+                  init?.method ??
+                  (target instanceof Request ? target.method : "GET");
+                const knownMethod = [
+                  "GET",
+                  "HEAD",
+                  "POST",
+                  "PUT",
+                  "PATCH",
+                  "DELETE",
+                  "OPTIONS",
+                ].includes(method.toUpperCase())
+                  ? method.toUpperCase()
+                  : "OTHER";
+                return decode(usageEventSchema, {
+                  requestId: options.ids(),
+                  connectionId: row.id,
+                  subject,
+                  grantor: grant(row.id, subject)?.grantor ?? null,
+                  host,
+                  pathTemplate:
+                    path === "/"
+                      ? "/"
+                      : path.slice(1).includes("/")
+                        ? "/:segment/…"
+                        : "/:segment",
+                  pathLength:
+                    path.length < 64
+                      ? "short"
+                      : path.length < 256
+                        ? "medium"
+                        : "long",
+                  method: knownMethod,
+                  outcome: "placed",
+                  status: null,
+                });
+              });
+        // An unwritable audit refuses the use: nothing is sent unaudited.
+        const auditState = { failed: false };
+        const record = (outcome: UsageEvent["outcome"]) => {
+          if (observed === null) return;
+          try {
+            writeAudit({ ...observed, outcome, status });
+          } catch (cause) {
+            auditState.failed = true;
+            throw cause;
+          }
+        };
+        const result = yield* deliver(
+          admit,
+          (row, tools) => {
+            phase = "destination";
+            const { kind, url } = row.surface;
+            return kind === "openapi" && tools !== "all"
+              ? // Effect and name grants are enforced per operation, by `call`.
+                Effect.fail(new ConnectionsError("denied"))
+              : io(async () => {
+                  let request: Request;
+                  try {
+                    request = new Request(target, init);
+                  } catch {
+                    throw new ConnectionsError("denied");
+                  }
+                  const admittedRequest = await admitRequest(
+                    kind === "http"
+                      ? { kind, destinations: row.surface.destinations ?? [] }
+                      : { kind, url },
+                    tools,
+                    request,
+                    policy,
+                  );
+                  phase = "grant";
+                  return admittedRequest;
+                }).pipe(
+                  Effect.map((request) => ({ request, operation: null })),
+                );
+          },
+          () => {
+            record("placed");
+            phase = "upstream";
+          },
+        ).pipe(Effect.result);
+        if (result._tag === "Failure") {
+          if (auditState.failed) return yield* Effect.fail(result.failure);
+          yield* sync(() => {
+            // After placement only an upstream answer is upstream_status; a
+            // revoke seen on the way back or a custodian failure is a denied
+            // use, which the ADR protects from pruning.
+            record(
+              phase === "destination"
+                ? "refused_destination"
+                : phase === "upstream" &&
+                    result.failure.code === "invalid_response"
+                  ? "upstream_status"
+                  : "refused_grant",
+            );
+          });
+          return yield* Effect.fail(result.failure);
+        }
+        const response = result.success;
+        status = response.status;
+        const audited = yield* sync(() => {
+          record("upstream_status");
+        }).pipe(Effect.result);
+        if (audited._tag === "Failure") {
+          yield* io(() => response.body?.cancel() ?? Promise.resolve());
+          return yield* Effect.fail(audited.failure);
+        }
+        return response;
       }),
     );
-  const egress = (agentId: string, input: EgressRef): NarrowFetch => {
+  const egress = (
+    subject: ConnectionSubject,
+    input: EgressRef,
+  ): NarrowFetch => {
     const ref = decode(egressRefSchema, input);
     return (target, init) =>
-      fetchThrough(() => admitted(agentId, ref), target, init);
+      fetchThrough(() => admitted(subject, ref), target, init, {
+        subject,
+        ref,
+      });
   };
 
   /** A typed OpenAPI operation: built from the stored table, checked against its stored schemas. */
@@ -878,9 +1183,13 @@ export function createConnections(options: ConnectionsOptions) {
       return yield* io(() => operationOutput(operation, text));
     });
 
-  const call = (agentId: string, input: EgressRef, raw: CallInput) => {
+  const call = (
+    subject: ConnectionSubject,
+    input: EgressRef,
+    raw: CallInput,
+  ) => {
     const ref = decode(egressRefSchema, input);
-    return callThrough(() => admitted(agentId, ref), raw);
+    return callThrough(() => admitted(subject, ref), raw);
   };
 
   /** The owner as sender: no Agent grant, and a version they last saw, when they name one. */
@@ -899,7 +1208,7 @@ export function createConnections(options: ConnectionsOptions) {
       row,
       tools: "all" as const,
       grantor: actor,
-      agentId: `owner:${actor}`,
+      subject: null,
     };
   };
   const ownerCall = (
@@ -1068,6 +1377,7 @@ export function createConnections(options: ConnectionsOptions) {
     revoke,
     projection,
     list,
+    audit,
     egress,
     call,
     ownerCall,

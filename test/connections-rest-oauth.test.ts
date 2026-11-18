@@ -241,15 +241,16 @@ describe("REST connections through an operator-registered provider", () => {
     await h.run(h.connections.complete("owner", h.remote.approve(url.href)));
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId: started.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: started.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: { effect: "read" },
       }),
     );
     const ref = { connectionId: started.connectionId, grantVersion };
     const call = () =>
       h.run(
-        h.connections.call("agent-a", ref, {
+        h.connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "listPets",
           input: {},
         }),

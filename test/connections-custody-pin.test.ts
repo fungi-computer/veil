@@ -141,15 +141,16 @@ describe("a custodian's credential goes only where its integration is pinned", (
     );
     const { grantVersion } = await run(
       h.connections.grant("owner", {
-        connectionId: started.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: started.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     const call = () =>
       run(
         h.connections.call(
-          "agent-a",
+          { kind: "agent", id: "agent-a" },
           { connectionId: started.connectionId, grantVersion },
           { operation: "getUser", input: {} },
         ),

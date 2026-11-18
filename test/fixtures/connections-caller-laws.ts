@@ -142,17 +142,19 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
     assert.equal((await run(connections.list("owner"))).length, 1);
     const grant = await run(
       connections.grant("owner", {
-        connectionId: connected.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connected.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["readRepository"],
       }),
     );
     const ref = { connectionId: connected.connectionId, ...grant };
     const input = { operation: "readRepository", input: {} };
-    const call = () => connections.call("agent-a", ref, input);
+    const call = () =>
+      connections.call({ kind: "agent", id: "agent-a" }, ref, input);
     publicValues.push(
       await run(connections.list("owner")),
-      await run(connections.projection("agent-a")),
+      await run(connections.projection({ kind: "agent", id: "agent-a" })),
     );
     assert.equal(
       (await readFile(path)).includes(Buffer.from(subject.secret)),
@@ -169,28 +171,32 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
     const beforeDenials = subject.requests();
     await run(
       connections.ungrant("owner", {
-        connectionId: connected.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connected.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
       }),
     );
     assert.equal(await code(call()), "revoked");
     const renewed = await run(
       connections.grant("owner", {
-        connectionId: connected.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connected.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["readRepository"],
       }),
     );
     ref.grantVersion = renewed.grantVersion;
 
     assert.equal(
-      await code(connections.call("agent-b", ref, input)),
+      await code(
+        connections.call({ kind: "agent", id: "agent-b" }, ref, input),
+      ),
       "revoked",
     );
     assert.equal(
       await code(
         connections.call(
-          "agent-a",
+          { kind: "agent", id: "agent-a" },
           { ...ref, grantVersion: ref.grantVersion + 1 },
           input,
         ),
@@ -199,7 +205,7 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
     );
     assert.equal(
       await code(
-        connections.call("agent-a", ref, {
+        connections.call({ kind: "agent", id: "agent-a" }, ref, {
           operation: "readOtherRepository",
           input: {},
         }),
@@ -212,7 +218,13 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
     const otherDatabase = new DatabaseSync(":memory:");
     try {
       assert.notEqual(
-        await code(open("team-b", otherDatabase).call("agent-a", ref, input)),
+        await code(
+          open("team-b", otherDatabase).call(
+            { kind: "agent", id: "agent-a" },
+            ref,
+            input,
+          ),
+        ),
         "ok",
       );
     } finally {
@@ -222,8 +234,9 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
 
     const allTools = await run(
       connections.grant("owner", {
-        connectionId: connected.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connected.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
@@ -232,7 +245,7 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
     aborted.abort();
     await assert.rejects(
       connections.egress(
-        "agent-a",
+        { kind: "agent", id: "agent-a" },
         ref,
       )(
         new Request(`${subject.baseUrl}/repos/fixture/selected`, {
@@ -274,7 +287,7 @@ export async function proveConnectionsCaller(subject: CallerSubject) {
     assert.equal(subject.requests(), beforeDisconnect);
     publicValues.push(
       await run(connections.list("owner")),
-      await run(connections.projection("agent-a")),
+      await run(connections.projection({ kind: "agent", id: "agent-a" })),
     );
     assert.equal(
       JSON.stringify(publicValues).includes(subject.secret),

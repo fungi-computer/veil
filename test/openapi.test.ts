@@ -748,6 +748,7 @@ it.each([
   "percent-lower",
   "base64",
   "base64url",
+  "hex",
   "bearer",
 ])(
   "redacts the %s credential encoding before returning an Agent result",
@@ -769,6 +770,9 @@ it.each([
         break;
       case "base64url":
         echoed = Buffer.from(secret).toString("base64url");
+        break;
+      case "hex":
+        echoed = Buffer.from(secret).toString("hex");
         break;
       case "bearer":
         echoed = `Bearer ${secret}`;

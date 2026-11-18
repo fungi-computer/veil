@@ -1,5 +1,51 @@
 # Veil (`@fungi.computer/veil`)
 
+Veil keeps passwords and API keys away from AI agents. Your host stores them,
+and an agent only gets permission to perform an operation, never the secret
+itself.
+
+```mermaid
+flowchart LR
+  Owner[Host owner] -->|stores API keys, OAuth, model keys| Veil
+  Veil --> Custody[(Sealed custody or Nango)]
+  Agent[Agent] -->|asks for an operation| Veil
+  Veil -->|sends with the credential| Provider[Provider]
+  Provider -->|result only| Agent
+```
+
+## Quick start
+
+Veil has no self-contained example, because every part of it needs your host:
+the owner's SQLite, a `CustodyAdapter` and live authorization. Install it, then
+read Set up, which names the pieces you hand to `createConnections`.
+
+```sh
+npm install @fungi.computer/veil
+```
+
+## Common tasks
+
+### Connect a provider
+
+See Set up and [OpenAPI door](#openapi-door).
+
+### Use Nango for custody
+
+See [Nango adapter](#nango-adapter).
+
+### Let an Agent fetch the public web
+
+See [Public-web door](#public-web-door).
+
+### Grant a model key
+
+See
+[Model credentials and failure handling](#model-credentials-and-failure-handling).
+
+## Reference
+
+### Overview
+
 Veil keeps provider credentials away from Agents. A host stores API keys, OAuth
 connections and model keys behind trusted owner doors, and an Agent receives an
 authorized operation, never the provider token or where it lives. It owns the
@@ -23,10 +69,10 @@ unavailable rather than manufacturing a connection.
 
 GitHub REST is an ordinary `openapi` connection with an `oauth` credential:
 through an operator-registered provider on either custody adapter, or through a
-Nango integration. A custodian-run integration is pinned by the host
-(`configuredCustodyIntegrations`) to one surface kind and one origin, and the
-core refuses it at `begin` and again before every send, so the credential Nango
-holds never goes anywhere else. GitHub REST is pinned to `api.github.com`.
+Nango integration. A custodian-run integration is pinned by the host to one
+surface kind and one origin, and the core refuses it at `begin` and again before
+every send, so the credential Nango holds never goes anywhere else. GitHub REST
+is pinned to `api.github.com`.
 
 A Computer's git is not a connection in this core.
 `@fungi.computer/veil/github-app` wraps Nango's `github-app` integration
@@ -59,10 +105,9 @@ connection that carries an attempt's state, actor and Team, so a sign-in whose
 signed completion was lost still settles. Cancellation stops the caller waiting;
 it does not prove upstream work stopped or rolled back.
 
-`configuredComputerGitIntegration(env)` names the integration through which a
-Computer's git signs in (`NANGO_GITHUB_APP_INTEGRATION_ID`);
-`NANGO_GITHUB_INTEGRATION_ID` joins the integrations an owner may sign in
-through for REST connections.
+The host's configuration names the integration through which a Computer's git
+signs in (`NANGO_GITHUB_APP_INTEGRATION_ID`); `NANGO_GITHUB_INTEGRATION_ID`
+joins the integrations an owner may sign in through for REST connections.
 
 ## Public-web door
 
@@ -94,20 +139,20 @@ may send. Veil reads both bindings itself, so the host names them and never sees
 their values. A host route may not shadow a Veil route, reuse one binding for
 both, or name one of Veil's own custody bindings; construction refuses it.
 
-Like the existing Hub search caller (`apps/hub/src/agent-web-search.ts`,
-`configuredWebSearch`), a caller obtains `baseUrl(route)` and passes
-credential-free requests through `providerFetch(egress, route)`. Requests go to
-exactly the pinned root as single POSTs whose JSON body the host schema accepts;
-caller headers, queries and alternate paths are not forwarded. The
-credential-bearing URL is never returned from `baseUrl`. Missing, invalid or
-unaccepted bindings refuse `unavailable` before fetch; other destinations,
-methods or bodies refuse `denied`. Redirects and non-2xx responses refuse
-`unavailable`; no upstream error body, headers or URL is returned. Successful
-bodies are bounded to 64 MiB and refused on a credential echo (raw, JSON-escaped
-or percent-encoded); request bodies are bounded to 64 KiB. Transport failures,
-including aborts, expose only fixed `VeilError` codes. Keep keys in the existing
-private Worker-secret custody, never Team storage, public config, telemetry or
-logs. The final transport sees the authorized URL and must not log it.
+Like the existing Hub search caller (`apps/hub/src/agent-web-search.ts`), a
+caller obtains `baseUrl(route)` and passes credential-free requests through
+`providerFetch(egress, route)`. Requests go to exactly the pinned root as single
+POSTs whose JSON body the host schema accepts; caller headers, queries and
+alternate paths are not forwarded. The credential-bearing URL is never returned
+from `baseUrl`. Missing, invalid or unaccepted bindings refuse `unavailable`
+before fetch; other destinations, methods or bodies refuse `denied`. Redirects
+and non-2xx responses refuse `unavailable`; no upstream error body, headers or
+URL is returned. Successful bodies are bounded to 64 MiB and refused on a
+credential echo (raw, JSON-escaped or percent-encoded); request bodies are
+bounded to 64 KiB. Transport failures, including aborts, expose only fixed
+`VeilError` codes. Keep keys in the existing private Worker-secret custody,
+never Team storage, public config, telemetry or logs. The final transport sees
+the authorized URL and must not log it.
 
 Veil also owns one anonymous door:
 
@@ -237,6 +282,11 @@ usage audit, a Vault page or general Session/log redaction. Existing OpenAPI
 echo checks above qualify only that door. The Wiki decision owns the extension
 and its limits; source and consumer tests establish which behavior is actually
 available.
+
+## Examples
+
+There is no standalone example. [Set up](#set-up) is the closest thing, and the
+tests in this package exercise each door.
 
 ## Contribute
 

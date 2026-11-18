@@ -45,6 +45,8 @@ const version = Schema.Number.pipe(
 
 const placementSchema = Schema.Union([
   Schema.Literal("bearer"),
+  /** The sealed value is the complete user:password pair. */
+  Schema.Literal("basic"),
   Schema.Struct({ header: headerName }),
   Schema.Struct({ query: queryName }),
 ]);
@@ -68,8 +70,35 @@ export const credentialSchema = Schema.Union([
 ]);
 export type Credential = typeof credentialSchema.Type;
 
-/** What the Agent can call. The OpenAPI table is decoded by Forage before it is stored. */
+export const destinationsSchema = Schema.Array(
+  Schema.Struct({
+    host: Schema.String.pipe(
+      Schema.check(Schema.isMinLength(1), Schema.isMaxLength(253)),
+    ),
+    pathPrefix: Schema.optional(
+      Schema.String.pipe(Schema.check(Schema.isMaxLength(2048))),
+    ),
+    methods: Schema.Array(
+      Schema.Literals([
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS",
+      ]),
+    ).pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(7))),
+  }),
+).pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(8)));
+export type HttpDestinations = typeof destinationsSchema.Type;
+
+/** What the subject can call. The OpenAPI table is decoded by Forage before it is stored. */
 const surfaceDraftSchema = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("http"),
+    destinations: destinationsSchema,
+  }),
   Schema.Struct({ kind: Schema.Literal("mcp"), url: Schema.String }),
   Schema.Struct({
     kind: Schema.Literal("openapi"),
@@ -78,6 +107,7 @@ const surfaceDraftSchema = Schema.Union([
   }),
 ]);
 export type SurfaceView =
+  | Readonly<{ kind: "http"; destinations: HttpDestinations }>
   | Readonly<{ kind: "mcp"; url: string }>
   | Readonly<{
       kind: "openapi";
@@ -120,12 +150,70 @@ export const draftSchema = Schema.Struct({
   ),
 });
 export type ConnectionDraft = typeof draftSchema.Type;
+export const subjectSchema = Schema.Struct({
+  /** The broker's principal vocabulary; a Composer scoped key is a team-key. */
+  kind: Schema.Literals(["agent", "computer", "app", "team-key"]),
+  id: identifier,
+});
+export type ConnectionSubject = typeof subjectSchema.Type;
+export const targetSchema = Schema.Struct({
+  kind: Schema.Literals(["connection", "secret"]),
+  id: identifier,
+});
+export type ConnectionTarget = typeof targetSchema.Type;
+export const connectionCapabilitySchema = Schema.Literals([
+  "connector.call",
+  "secret.use",
+]);
+/** The one resource grant model, shared by connector and secret callers. */
 export const grantInputSchema = Schema.Struct({
-  connectionId: identifier,
-  agentId: identifier,
+  subject: subjectSchema,
+  target: targetSchema,
+  capability: connectionCapabilitySchema,
   tools: toolsSchema,
 });
 export type GrantInput = typeof grantInputSchema.Type;
+/** One credential use, as audited; never the value, path or query. */
+export const usageEventSchema = Schema.Struct({
+  /** The first request a coalesced row records. */
+  requestId: identifier,
+  connectionId: identifier,
+  subject: subjectSchema,
+  grantor: Schema.NullOr(identifier),
+  /** Only an owner-configured host; an unbound destination is null. */
+  host: Schema.NullOr(Schema.String),
+  /** Fixed shape only: even the first path segment can contain a credential. */
+  pathTemplate: Schema.Literals(["/", "/:segment", "/:segment/…"]),
+  pathLength: Schema.Literals(["short", "medium", "long"]),
+  method: Schema.Literals([
+    "GET",
+    "HEAD",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+    "OTHER",
+  ]),
+  outcome: Schema.Literals([
+    "placed",
+    "refused_destination",
+    "refused_grant",
+    "upstream_status",
+  ]),
+  status: Schema.NullOr(Schema.Number),
+});
+export type UsageEvent = typeof usageEventSchema.Type;
+/** Identical uses within one minute of `firstAt` share a row and a count. */
+export const usageAuditSchema = Schema.Struct({
+  ...usageEventSchema.fields,
+  firstAt: Schema.Number,
+  lastAt: Schema.Number,
+  count: Schema.Number.pipe(
+    Schema.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  ),
+});
+export type ConnectionUsage = typeof usageAuditSchema.Type;
 /** The authorization server's redirect back to the owner. */
 export const completeInputSchema = Schema.Struct({
   state: Schema.String.pipe(Schema.check(Schema.isMaxLength(512))),
@@ -295,7 +383,13 @@ export type ConnectionsOptions = Readonly<{
    */
   check?: (
     grantor: string,
-    grant: Readonly<{ agentId: string; connectionId: string; tools: Tools }>,
+    /** Null subject means the managing owner, not a resource grant. */
+    grant: Readonly<{
+      subject: ConnectionSubject | null;
+      target: ConnectionTarget;
+      capability: GrantInput["capability"];
+      tools: Tools;
+    }>,
     operation: Readonly<{
       name: string;
       effect: "read" | "write" | null;
@@ -343,10 +437,11 @@ export type ConnectionView = Readonly<{
   name: string;
   label: string;
   surface: Readonly<{
-    kind: "mcp" | "openapi";
+    kind: "mcp" | "openapi" | "http";
     origin: string;
     url: string;
     digest: string | null;
+    destinations?: HttpDestinations;
   }>;
   credentialKind: Credential["kind"];
   /** How the secret is placed; the secret itself never appears. */
@@ -355,7 +450,9 @@ export type ConnectionView = Readonly<{
   version: number;
   authorityVersion: number;
   grants: readonly Readonly<{
-    agentId: string;
+    subject: ConnectionSubject;
+    target: ConnectionTarget;
+    capability: GrantInput["capability"];
     tools: Tools;
     version: number;
     grantor: string;

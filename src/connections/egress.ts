@@ -1,7 +1,12 @@
 import * as Schema from "effect/Schema";
+import ipaddr from "ipaddr.js";
 import { assertPublicHostName } from "../model-key-network.js";
 import type { createPublicEgressPolicy } from "../public-egress-policy.js";
-import { ConnectionsError, type Tools } from "./contract.js";
+import {
+  ConnectionsError,
+  type Tools,
+  type HttpDestinations,
+} from "./contract.js";
 
 const bodyLimit = 256 * 1024;
 const owned = ["authorization", "proxy-authorization", "cookie"];
@@ -12,7 +17,67 @@ const toolCall = Schema.decodeUnknownSync(
   Schema.Struct({ name: Schema.String }),
 );
 
-export type Endpoint = Readonly<{ kind: "mcp" | "openapi"; url: string }>;
+export type Endpoint =
+  | Readonly<{ kind: "mcp" | "openapi"; url: string }>
+  | Readonly<{ kind: "http"; destinations: HttpDestinations }>;
+
+/** URL and ipaddr own parsing. These refinements admit only canonical exact DNS hosts. */
+export function validateDestinations(destinations: HttpDestinations): void {
+  for (const rule of destinations) {
+    const url = URL.parse(`https://${rule.host}`);
+    if (
+      url?.hostname !== rule.host ||
+      url.host !== rule.host ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash ||
+      rule.host.includes("*") ||
+      rule.host.endsWith(".") ||
+      ipaddr.isValid(
+        rule.host.startsWith("[") ? rule.host.slice(1, -1) : rule.host,
+      )
+    )
+      throw new ConnectionsError("invalid_input");
+    try {
+      assertPublicHostName(url.hostname);
+    } catch {
+      throw new ConnectionsError("invalid_input");
+    }
+    if (rule.pathPrefix !== undefined) {
+      const path = URL.parse(rule.pathPrefix, url.href);
+      if (
+        !rule.pathPrefix.startsWith("/") ||
+        path?.origin !== url.origin ||
+        path.pathname !== rule.pathPrefix ||
+        path.search ||
+        path.hash
+      )
+        throw new ConnectionsError("invalid_input");
+    }
+  }
+}
+
+const insideHttp = (
+  target: URL,
+  method: string,
+  destinations: HttpDestinations,
+) =>
+  target.protocol === "https:" &&
+  target.port === "" &&
+  destinations.some(
+    (rule) =>
+      target.hostname === rule.host &&
+      rule.methods.some((allowed) => allowed === method) &&
+      (rule.pathPrefix === undefined ||
+        target.pathname === rule.pathPrefix ||
+        target.pathname.startsWith(
+          rule.pathPrefix.endsWith("/")
+            ? rule.pathPrefix
+            : `${rule.pathPrefix}/`,
+        )),
+  );
 
 /** One request, one verdict. The caller holds the grant; this proves the request stays inside it. */
 export async function admitRequest(
@@ -22,14 +87,17 @@ export async function admitRequest(
   policy: ReturnType<typeof createPublicEgressPolicy>,
 ): Promise<Request> {
   const target = new URL(request.url);
-  const base = new URL(endpoint.url);
+  const base = endpoint.kind === "http" ? null : new URL(endpoint.url);
   const inside =
-    endpoint.kind === "mcp"
-      ? target.href === base.href
-      : target.origin === base.origin &&
-        target.pathname.startsWith(
-          base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`,
-        );
+    endpoint.kind === "http"
+      ? insideHttp(target, request.method, endpoint.destinations)
+      : endpoint.kind === "mcp"
+        ? target.href === base?.href
+        : base !== null &&
+          target.origin === base.origin &&
+          target.pathname.startsWith(
+            base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`,
+          );
   if (
     !inside ||
     request.redirect !== "error" ||

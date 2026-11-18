@@ -3,9 +3,10 @@ import {
   type ConnectionProjection,
   type EgressRef,
   type NarrowFetch,
+  type ConnectionSubject,
 } from "./contract.js";
 
-/** One Agent MCP request as plain data, so it can cross a Durable Object RPC boundary. */
+/** One owner-completed request as plain data, so it can cross a Durable Object RPC boundary. */
 export type McpRequestData = Readonly<{
   url: string;
   method: string;
@@ -27,12 +28,13 @@ export async function mcpRequestData(
 }
 
 /**
- * Complete one Agent MCP request on the owner side, the only place a
- * credential opens. A refusal comes back as a code, never a thrown message.
+ * Complete one subject's request on the owner side, the only place a
+ * credential opens. The owner builds the request, so a URL it cannot carry
+ * is a refusal like any other. A refusal comes back as a code, never a thrown message.
  */
-export async function answerMcpRequest(
-  egress: (agentId: string, ref: EgressRef) => NarrowFetch,
-  agentId: string,
+export async function answerEgressRequest(
+  egress: (subject: ConnectionSubject, ref: EgressRef) => NarrowFetch,
+  subject: ConnectionSubject,
   ref: EgressRef,
   data: McpRequestData,
 ): Promise<Response | McpRefusal> {
@@ -43,7 +45,7 @@ export async function answerMcpRequest(
       redirect: "error",
     };
     if (data.body !== null) init.body = data.body;
-    return await egress(agentId, ref)(new Request(data.url, init));
+    return await egress(subject, ref)(data.url, init);
   } catch (cause) {
     if (cause instanceof ConnectionsError) return { error: cause.code };
     throw cause;

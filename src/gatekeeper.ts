@@ -65,6 +65,8 @@ export type VeilBindings = ProviderKeyBindings &
     /** Dedicated custody root for Team OpenAPI API-key/bearer credentials. */
     OPENAPI_CREDENTIAL_MASTER_KEY?: string;
     OPENAPI_CREDENTIAL_KEY_ID?: string;
+    /** JSON object of retired key ids to keys, kept only while a rotation rewraps. */
+    OPENAPI_CREDENTIAL_PREVIOUS_KEYS?: string;
     NANGO_SERVER_URL?: string;
     NANGO_API_KEY?: string;
     NANGO_WEBHOOK_SIGNING_KEY?: string;
@@ -392,18 +394,33 @@ export type OpenApiHostOptions = Readonly<{
   fetch: typeof fetch;
   store: OpenApiCredentialStore;
   networkPolicy?: OpenApiDoorOptions["networkPolicy"];
-  previousCredentialKeys?: Readonly<Record<string, string>>;
   oauthProviders?: Readonly<Record<string, OpenApiOAuthProvider>>;
 }>;
 
-/** The keyring that seals OpenAPI credentials; only Gatekeeper reads the master key. */
+const previousKeys = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)),
+);
+
+/**
+ * The keyring that seals OpenAPI credentials; only Gatekeeper reads the master
+ * key. Retired keys open (and rewrap) existing data keys and never seal.
+ */
 export function openApiCredentialKeyring(
   env: VeilBindings,
-  previous?: Readonly<Record<string, string>>,
 ): OpenApiCredentialKeyring | undefined {
   const key = env.OPENAPI_CREDENTIAL_MASTER_KEY;
   if (!key) return undefined;
   const id = env.OPENAPI_CREDENTIAL_KEY_ID ?? "primary";
+  const retained = env.OPENAPI_CREDENTIAL_PREVIOUS_KEYS;
+  let previous: Readonly<Record<string, string>> = {};
+  try {
+    if (retained !== undefined) previous = previousKeys(retained);
+  } catch {
+    // The value is secret material: refuse without echoing the parse error.
+    throw new VeilError("unavailable");
+  }
+  // The active id always names the active key; a retained copy cannot shadow it.
+  if (Object.hasOwn(previous, id)) throw new VeilError("unavailable");
   return { activeKeyId: id, keys: { ...previous, [id]: key } };
 }
 
@@ -419,7 +436,7 @@ function openApiHostConfiguration(
   };
   if (options.oauthProviders)
     doorOptions.oauthProviders = options.oauthProviders;
-  const keys = openApiCredentialKeyring(env, options.previousCredentialKeys);
+  const keys = openApiCredentialKeyring(env);
   if (keys) doorOptions.custody = { keys, store: options.store };
   return doorOptions;
 }

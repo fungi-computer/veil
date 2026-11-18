@@ -199,15 +199,19 @@ describe("openapi surface", () => {
     );
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
-    const fetch = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion,
-    });
+    const fetch = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion,
+      },
+    );
     const get = (url: string) => fetch(new Request(url, { redirect: "error" }));
     expect((await get("https://api.example.com/v1/ping")).status).toBe(200);
     expect(await code(get("https://api.example.com/v2/ping"))).toBe("denied");
@@ -234,8 +238,9 @@ describe("openapi surface", () => {
     expect(await code(upload(new Uint8Array(256 * 1024 + 1)))).toBe(
       "too_large",
     );
-    const projected = (await h.run(h.connections.projection("agent-a")))
-      .connections[0];
+    const projected = (
+      await h.run(h.connections.projection({ kind: "agent", id: "agent-a" }))
+    ).connections[0];
     expect(projected?.surface.kind).toBe("openapi");
     expect(JSON.stringify(projected)).not.toContain(marker);
   });
@@ -247,13 +252,17 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     const response = await call(
-      h.connections.egress("agent-a", { connectionId, grantVersion }),
+      h.connections.egress(
+        { kind: "agent", id: "agent-a" },
+        { connectionId, grantVersion },
+      ),
       "anything",
     );
     expect(response.status).toBe(200);
@@ -261,7 +270,10 @@ describe("connections core", () => {
     expect(
       await code(
         call(
-          h.connections.egress("agent-b", { connectionId, grantVersion }),
+          h.connections.egress(
+            { kind: "agent", id: "agent-b" },
+            { connectionId, grantVersion },
+          ),
           "anything",
         ),
       ),
@@ -273,15 +285,19 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
-    const fetch = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion,
-    });
+    const fetch = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion,
+      },
+    );
     expect((await call(fetch, "t")).status).toBe(200);
     await h.run(h.connections.revoke("owner", { connectionId }));
     expect(await code(call(fetch, "t"))).toBe("revoked");
@@ -294,20 +310,28 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
-    const fetch = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion,
-    });
+    const fetch = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion,
+      },
+    );
     h.authority.delete("owner");
     expect(await code(call(fetch, "t"))).toBe("denied");
     h.authority.add("owner");
     await h.run(
-      h.connections.ungrant("owner", { connectionId, agentId: "agent-a" }),
+      h.connections.ungrant("owner", {
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
+      }),
     );
     expect(await code(call(fetch, "t"))).toBe("revoked");
   });
@@ -317,27 +341,35 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const wide = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
-    const stale = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion: wide.grantVersion,
-    });
+    const stale = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion: wide.grantVersion,
+      },
+    );
     const narrow = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["search"],
       }),
     );
     expect(await code(call(stale, "search"))).toBe("revoked");
-    const fresh = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion: narrow.grantVersion,
-    });
+    const fresh = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion: narrow.grantVersion,
+      },
+    );
     expect((await call(fresh, "search")).status).toBe(200);
   });
 
@@ -346,12 +378,15 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["search"],
       }),
     );
-    const projection = await h.run(h.connections.projection("agent-a"));
+    const projection = await h.run(
+      h.connections.projection({ kind: "agent", id: "agent-a" }),
+    );
     expect(projection.connections).toHaveLength(1);
     expect(JSON.stringify(projection)).not.toContain(marker);
     expect(
@@ -367,7 +402,8 @@ describe("connections core", () => {
     );
     expect(dump).not.toContain(marker);
     expect(
-      (await h.run(h.connections.projection("agent-b"))).connections,
+      (await h.run(h.connections.projection({ kind: "agent", id: "agent-b" })))
+        .connections,
     ).toEqual([]);
   });
 
@@ -376,15 +412,19 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
-    const fetch = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion,
-    });
+    const fetch = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion,
+      },
+    );
     const body = jsonRpc("tools/list");
     expect(await code(fetch(post(body, { redirect: "follow" })))).toBe(
       "denied",
@@ -437,15 +477,19 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     expect(
       await code(
         call(
-          h.connections.egress("agent-a", { connectionId, grantVersion }),
+          h.connections.egress(
+            { kind: "agent", id: "agent-a" },
+            { connectionId, grantVersion },
+          ),
           "t",
         ),
       ),
@@ -474,23 +518,26 @@ describe("connections core", () => {
     expect(await h.run(h.connections.list("owner"))).toHaveLength(1);
     const g1 = await h.run(
       h.connections.grant("owner", {
-        connectionId: first.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: first.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     const g2 = await h.run(
       h.connections.grant("owner", {
-        connectionId: first.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: first.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     expect(g2.grantVersion).toBe(g1.grantVersion);
     const narrowed = await h.run(
       h.connections.grant("owner", {
-        connectionId: first.connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: first.connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["x"],
       }),
     );
@@ -513,15 +560,19 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: ["search"],
       }),
     );
-    const fetch = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion,
-    });
+    const fetch = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion,
+      },
+    );
     expect((await call(fetch, "search")).status).toBe(200);
     expect((await fetch(post(jsonRpc("tools/list")))).status).toBe(200);
     expect(await code(call(fetch, "delete_everything"))).toBe("denied");
@@ -535,15 +586,19 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
     expect(
       (
         await call(
-          h.connections.egress("agent-a", { connectionId, grantVersion }),
+          h.connections.egress(
+            { kind: "agent", id: "agent-a" },
+            { connectionId, grantVersion },
+          ),
           "added_tomorrow",
         )
       ).status,
@@ -555,15 +610,19 @@ describe("connections core", () => {
     const { connectionId } = await h.connect();
     const { grantVersion } = await h.run(
       h.connections.grant("owner", {
-        connectionId,
-        agentId: "agent-a",
+        target: { kind: "connection", id: connectionId },
+        subject: { kind: "agent", id: "agent-a" },
+        capability: "connector.call",
         tools: "all",
       }),
     );
-    const fetch = h.connections.egress("agent-a", {
-      connectionId,
-      grantVersion,
-    });
+    const fetch = h.connections.egress(
+      { kind: "agent", id: "agent-a" },
+      {
+        connectionId,
+        grantVersion,
+      },
+    );
     expect((await call(fetch, "t")).status).toBe(200);
     h.needReconnect();
     expect(await code(call(fetch, "t"))).toBe("reconnect_required");
@@ -572,7 +631,8 @@ describe("connections core", () => {
       "reconnect_required",
     );
     expect(
-      (await h.run(h.connections.projection("agent-a"))).connections,
+      (await h.run(h.connections.projection({ kind: "agent", id: "agent-a" })))
+        .connections,
     ).toEqual([]);
   });
 

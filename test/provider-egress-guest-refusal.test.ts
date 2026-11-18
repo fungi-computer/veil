@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { Buffer } from "node:buffer";
+import { z } from "zod";
 import { VeilError } from "../src/index.js";
 import {
   createProviderEgress,
@@ -17,6 +19,36 @@ const CAMEL = "synthetic-camel-key-do-not-leak";
 const GATEWAY = "synthetic-gateway-token-do-not-leak";
 const PARALLEL = "synthetic-parallel-key-do-not-leak";
 const SECRETS = [CAMEL, GATEWAY, PARALLEL];
+
+it("refuses encoded credential echoes from a host-registered keyed route", async () => {
+  const root = "https://vault-echo.example/";
+  const secret = "vault-provider-canary-37";
+  for (const encoding of ["base64", "base64url", "hex"] as const) {
+    const bindings = {
+      CAMEL_API_KEY: CAMEL,
+      ECHO_ROOT: root,
+      ECHO_SECRET: secret,
+    };
+    const egress = createProviderEgress(bindings, {
+      keyed: {
+        echo: {
+          urlBinding: "ECHO_ROOT",
+          keyBinding: "ECHO_SECRET",
+          accepts: (url) => url.href === root,
+          credential: { in: "query", name: "key" },
+          body: z.object({}),
+        },
+      },
+      fetch: () =>
+        Promise.resolve(
+          Response.json({ echo: Buffer.from(secret).toString(encoding) }),
+        ),
+    });
+    await expect(
+      egress.fetch("echo", root, { method: "POST", body: "{}" }),
+    ).rejects.toMatchObject({ code: "unavailable" });
+  }
+});
 
 const env: ProviderKeyBindings = {
   CAMEL_API_KEY: CAMEL,

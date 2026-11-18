@@ -31,14 +31,15 @@ function applyPlacement(
   placement: Placement,
   secret: string,
 ): Request {
-  if (placement !== "bearer" && "query" in placement) {
+  const headers = new Headers(request.headers);
+  if (placement === "bearer") headers.set("authorization", `Bearer ${secret}`);
+  else if (placement === "basic")
+    headers.set("authorization", `Basic ${btoa(secret)}`);
+  else if ("query" in placement) {
     const target = new URL(request.url);
     target.searchParams.set(placement.query, secret);
     return new Request(target.href, request);
-  }
-  const headers = new Headers(request.headers);
-  if (placement === "bearer") headers.set("authorization", `Bearer ${secret}`);
-  else headers.set(placement.header, secret);
+  } else headers.set(placement.header, secret);
   return new Request(request, { headers });
 }
 

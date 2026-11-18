@@ -1,4 +1,4 @@
-import { Buffer } from "node:buffer";
+import { createKnownValueRedactor } from "./redaction.js";
 import { createPublicEgressPolicy } from "./public-egress-policy.js";
 import * as Effect from "effect/Effect";
 import { VeilError } from "./index.js";
@@ -13,19 +13,6 @@ import { createPublicHttp } from "./public-fetch.js";
 import { assertPublicHostName } from "./model-key-network.js";
 import { readOpenApiBody } from "./openapi-http.js";
 
-const credentialEncodings = (credential: string) => [
-  ...new Set([
-    credential,
-    `Bearer ${credential}`,
-    JSON.stringify(credential).slice(1, -1),
-    encodeURIComponent(credential),
-    encodeURIComponent(credential).replace(/%[0-9A-F]{2}/gu, (part) =>
-      part.toLowerCase(),
-    ),
-    Buffer.from(credential).toString("base64"),
-    Buffer.from(credential).toString("base64url"),
-  ]),
-];
 const encoder = new TextEncoder();
 const bodyLimit = 256 * 1024;
 const methods = new Set([
@@ -325,33 +312,26 @@ export function createOpenApiEffects(
               signal,
             );
             // An untrusted server must not turn any common credential encoding into a model result.
-            const safeBody =
+            const redactor =
               credential === undefined
+                ? undefined
+                : createKnownValueRedactor([credential]);
+            const safeBody =
+              redactor === undefined
                 ? bytes
                 : encoder.encode(
-                    credentialEncodings(credential)
-                      .sort((a, b) => b.length - a.length)
-                      .reduce(
-                        (body, value) => body.replaceAll(value, "[REDACTED]"),
-                        new TextDecoder().decode(bytes),
-                      ),
+                    (await redactor.redact(new TextDecoder().decode(bytes)))
+                      .text,
                   );
             if (safeBody.byteLength > bodyLimit)
               throw new OpenApiError("too_large");
             if (!response.ok)
               throw new OpenApiError("upstream_status", response.status);
-            const contentType =
-              (response.headers.get("content-type") ?? "")
-                .split(";")[0]
-                ?.trim()
-                .toLowerCase() ?? "";
-            if (
-              credential !== undefined &&
-              credentialEncodings(credential).some((value) =>
-                contentType.includes(value.toLowerCase()),
-              )
-            )
+            const rawContentType = response.headers.get("content-type") ?? "";
+            if (redactor && (await redactor.contains(rawContentType)))
               throw new OpenApiError("invalid_response");
+            const contentType =
+              rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
             if (
               bytes.byteLength > 0 &&
               !/^(application\/(?:[a-z0-9.+-]+\+)?json|text\/[a-z0-9.+-]+)(?:\s*;|$)/iu.test(

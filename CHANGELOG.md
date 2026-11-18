@@ -1,5 +1,29 @@
 # @fungi.computer/veil
 
+## 0.8.0
+
+### Minor Changes
+
+- Changes since 0.7.9:
+
+  - fix(veil): redact secrets embedded mid-base64 and JSON \u escapes
+  - fix(veil): recheck every secret subject and protect post-send refusals
+  - fix(veil): retry a failed envelope migration without dropping its promise
+  - feat(veil): give Session hosts a fingerprint redactor, not values
+  - fix(veil): follow the Vault ADR audit and subject rules
+  - feat(veil): retain previous Hub credential keys for envelope rotation
+  - fix(hub): name the secret.use key grant and keep shared secret laws on the
+    public contract
+  - feat(veil): keep secrets as http connections with subject grants and audit
+  - feat(veil): seal credentials under owner envelope keys with configured
+    rotation
+  - feat(veil): add known-value and gitleaks default-rule redaction
+
+### Patch Changes
+
+- @fungi.computer/mycelium@0.4.6
+  - @fungi.computer/forage@0.3.13
+
 ## 0.7.9
 
 ### Patch Changes

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import * as Schema from "effect/Schema";
 import { defineIdFamily } from "@fungi.computer/cairn";
+import type { SqlStore } from "./connections/contract.js";
 
 /**
  * Veil's one encrypted credential store. A host holds a dedicated 32-byte
@@ -29,16 +30,17 @@ const keySchema = Schema.String.pipe(
 const keyIdSchema = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/u)),
 );
-const envelopeSchema = Schema.Struct({
-  version: Schema.Literal(1),
-  keyId: keyIdSchema,
-  iv: Schema.String.pipe(
-    Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{16}$/u)),
-  ),
-  ciphertext: Schema.String.pipe(
-    Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{22,22000}$/u)),
-  ),
-});
+const envelopeSchema = (version: 1 | 2) =>
+  Schema.Struct({
+    version: Schema.Literal(version),
+    keyId: keyIdSchema,
+    iv: Schema.String.pipe(
+      Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{16}$/u)),
+    ),
+    ciphertext: Schema.String.pipe(
+      Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{22,22000}$/u)),
+    ),
+  });
 const encoder = new TextEncoder();
 
 /**
@@ -48,6 +50,14 @@ const encoder = new TextEncoder();
 export function createCredentialSealer(
   configuration: CredentialKeyring,
   domain: string,
+) {
+  return credentialSealer(configuration, domain, 1);
+}
+
+function credentialSealer(
+  configuration: CredentialKeyring,
+  domain: string,
+  version: 1 | 2,
 ) {
   const keys = new Map<
     string,
@@ -98,7 +108,7 @@ export function createCredentialSealer(
         encoder.encode(credential),
       );
       return JSON.stringify({
-        version: 1,
+        version,
         keyId: activeKeyId,
         iv: Buffer.from(iv).toString("base64url"),
         ciphertext: Buffer.from(ciphertext).toString("base64url"),
@@ -110,7 +120,7 @@ export function createCredentialSealer(
     ): Promise<string> {
       try {
         const envelope = Schema.decodeUnknownSync(
-          Schema.fromJsonString(envelopeSchema),
+          Schema.fromJsonString(envelopeSchema(version)),
         )(sealed);
         const plaintext = await crypto.subtle.decrypt(
           {
@@ -129,6 +139,165 @@ export function createCredentialSealer(
   };
 }
 export type CredentialSealer = ReturnType<typeof createCredentialSealer>;
+
+/**
+ * One random data key per owner, wrapped separately from its credential rows.
+ * Only the wrapping key changes during rotation. Reads never cache the data
+ * key, so deleting its row also disables already-constructed custody handles.
+ * SQLite owns create-if-absent and compare-and-swap across concurrent handles.
+ */
+export function createOwnerCredentialSealer(options: {
+  storage: SqlStore;
+  keyring: CredentialKeyring;
+  domain: string;
+  ownerId: string;
+}) {
+  const { storage, keyring, domain, ownerId } = options;
+  if (ownerId.length === 0) throw new CredentialError("unavailable");
+  const wrapper = createCredentialSealer(keyring, `${domain}.data-key`);
+  storage.sql.exec(
+    "CREATE TABLE IF NOT EXISTS veil_credential_keys (owner_id TEXT PRIMARY KEY, wrapped_key TEXT NOT NULL) STRICT",
+  );
+  const rowSchema = Schema.Struct({ wrapped_key: Schema.String });
+  const read = () => {
+    const row = storage.sql
+      .exec(
+        "SELECT wrapped_key FROM veil_credential_keys WHERE owner_id = ?",
+        ownerId,
+      )
+      .toArray()[0];
+    return row === undefined
+      ? undefined
+      : Schema.decodeUnknownSync(rowSchema)(row).wrapped_key;
+  };
+  const load = async (create: boolean) => {
+    let wrapped = read();
+    if (wrapped === undefined && create) {
+      const generated = Buffer.from(
+        crypto.getRandomValues(new Uint8Array(32)),
+      ).toString("base64url");
+      const candidate = await wrapper.seal([ownerId], generated);
+      storage.sql.exec(
+        "INSERT INTO veil_credential_keys (owner_id, wrapped_key) VALUES (?, ?) ON CONFLICT(owner_id) DO NOTHING",
+        ownerId,
+        candidate,
+      );
+      wrapped = read();
+    }
+    if (wrapped === undefined) throw new CredentialError("denied");
+    const dataKey = await wrapper.open([ownerId], wrapped);
+    const envelope = Schema.decodeUnknownSync(
+      Schema.fromJsonString(envelopeSchema(1)),
+    )(wrapped);
+    if (envelope.keyId !== keyring.activeKeyId) {
+      const next = await wrapper.seal([ownerId], dataKey);
+      const changed = storage.sql
+        .exec(
+          "UPDATE veil_credential_keys SET wrapped_key = ? WHERE owner_id = ? AND wrapped_key = ? RETURNING owner_id",
+          next,
+          ownerId,
+          wrapped,
+        )
+        .toArray();
+      if (changed.length === 0) throw new CredentialError("unavailable");
+    }
+    return credentialSealer(
+      { activeKeyId: "data", keys: { data: dataKey } },
+      `${domain}.records`,
+      2,
+    );
+  };
+  return {
+    async seal(context: readonly (string | null)[], credential: string) {
+      return (await load(true)).seal([ownerId, ...context], credential);
+    },
+    async open(context: readonly (string | null)[], sealed: string) {
+      return (await load(false)).open([ownerId, ...context], sealed);
+    },
+    /** Rewrap without touching any credential. Missing/deleted keys refuse. */
+    async rewrap(): Promise<void> {
+      await load(false);
+    },
+    /** Crypto-shred this owner's records; no in-memory data key survives. */
+    destroy(): void {
+      storage.sql.exec(
+        "DELETE FROM veil_credential_keys WHERE owner_id = ?",
+        ownerId,
+      );
+    },
+  };
+}
+export type OwnerCredentialSealer = ReturnType<
+  typeof createOwnerCredentialSealer
+>;
+
+/**
+ * An owner's credential store: no keyring means no custody, and the owner's
+ * envelope migration completes before any row is read or written, so the
+ * store never holds a pre-migration row in hand.
+ */
+export function createOwnerCredentialStore(options: {
+  owner: SqlStore;
+  storage: CredentialStorage;
+  ownerId: string;
+  domain: string;
+  keyring: CredentialKeyring | undefined;
+  migrate?: () => Promise<void>;
+  now?: () => number;
+}): CredentialStore {
+  const { keyring, storage, now } = options;
+  if (keyring === undefined) {
+    const unavailable = () =>
+      Promise.reject(new CredentialError("unavailable"));
+    // Listing and removal need no key; sealing and opening refuse.
+    return createCredentialStore({
+      storage,
+      sealer: { seal: unavailable, open: unavailable },
+      now: now ?? Date.now,
+    });
+  }
+  let migration: Promise<void> | undefined;
+  const ready = async () => {
+    const running = (migration ??= (
+      options.migrate ?? (() => migrateCredentialEnvelopes(options))
+    )());
+    try {
+      await running;
+    } catch (cause) {
+      // A failed attempt is retried by the next use instead of being cached.
+      if (migration === running) migration = undefined;
+      throw cause;
+    }
+  };
+  const gated: CredentialStorage = {
+    get: async (key) => {
+      await ready();
+      return storage.get(key);
+    },
+    put: async (key, value) => {
+      await ready();
+      return storage.put(key, value);
+    },
+    delete: async (key) => {
+      await ready();
+      return storage.delete(key);
+    },
+    list: async (prefix) => {
+      await ready();
+      return storage.list(prefix);
+    },
+  };
+  return createCredentialStore({
+    storage: gated,
+    sealer: createOwnerCredentialSealer({
+      storage: options.owner,
+      ownerId: options.ownerId,
+      domain: options.domain,
+      keyring,
+    }),
+    now: now ?? Date.now,
+  });
+}
 
 /** What a listing shows: no secret, no ciphertext. */
 export type CredentialRecord = Readonly<{
@@ -149,6 +318,74 @@ export type CredentialStorage = Readonly<{
   delete(key: string): Promise<boolean>;
   list(prefix: string): Promise<Map<string, StoredCredential>>;
 }>;
+
+/**
+ * Explicit host migration, never a fallback reader. Each replaced row is a
+ * restartable checkpoint; the completion marker closes the old representation.
+ * The host runs this before admitting credential writes.
+ */
+export async function migrateCredentialEnvelopes(options: {
+  owner: SqlStore;
+  storage: CredentialStorage;
+  ownerId: string;
+  domain: string;
+  keyring: CredentialKeyring | undefined;
+}): Promise<void> {
+  const { owner, storage, ownerId, domain, keyring } = options;
+  owner.sql.exec(
+    "CREATE TABLE IF NOT EXISTS veil_credential_migrations (owner_id TEXT NOT NULL, domain TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (owner_id, domain)) STRICT",
+  );
+  // Without custody configured nothing can be opened or sealed; migrate once it is.
+  if (keyring === undefined) return;
+  const rows = await storage.list("credential:");
+  const current = createOwnerCredentialSealer({
+    storage: owner,
+    ownerId,
+    domain,
+    keyring,
+  });
+  const complete =
+    owner.sql
+      .exec(
+        "SELECT version FROM veil_credential_migrations WHERE owner_id = ? AND domain = ? AND version = 1",
+        ownerId,
+        domain,
+      )
+      .toArray().length !== 0;
+  if (!complete) {
+    const legacy = createCredentialSealer(keyring, domain);
+    const decodeVersion = Schema.decodeUnknownSync(
+      Schema.fromJsonString(
+        Schema.Struct({ version: Schema.Literals([1, 2]) }),
+      ),
+    );
+    for (const [key, row] of rows) {
+      let version: 1 | 2;
+      try {
+        version = decodeVersion(row.sealed).version;
+      } catch {
+        throw new CredentialError("denied");
+      }
+      const context = [row.credentialId, row.kind];
+      if (version === 2) {
+        // A prior attempt committed this row before interruption.
+        await current.open(context, row.sealed);
+      } else {
+        const secret = await legacy.open(context, row.sealed);
+        await storage.put(key, {
+          ...row,
+          sealed: await current.seal(context, secret),
+        });
+      }
+    }
+    owner.sql.exec(
+      "INSERT INTO veil_credential_migrations (owner_id, domain, version) VALUES (?, ?, 1) ON CONFLICT(owner_id, domain) DO UPDATE SET version = 1",
+      ownerId,
+      domain,
+    );
+  }
+  if (rows.size !== 0) await current.rewrap();
+}
 
 const ids = defineIdFamily({
   family: "veil-credential",
