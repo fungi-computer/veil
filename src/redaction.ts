@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { RE2JS } from "re2js";
 import { z } from "zod";
 import { VeilError } from "./index.js";
+import { openFrom, openRules, type OpenRule } from "./redaction-open.js";
 
 /**
  * Veil's one redactor. Masking is the backstop; injection is the control:
@@ -44,10 +45,29 @@ export type TextSpan = Readonly<{ start: number; end: number }>;
  */
 export type PatternMatch = Readonly<{ match: TextSpan; secret: TextSpan }>;
 
+/** Reads the text after an unfinished match, piece by piece, in order. */
+export type MatchFollower = Readonly<{
+  /** Where in `piece` the match has certainly ended, or undefined. */
+  read: (piece: string) => number | undefined;
+}>;
+
+/** An unfinished match: its opener, and a follower for the text after. */
+export type OpenMatch = Readonly<{
+  opener: TextSpan;
+  /** Follows the match from the end of the scanned text. */
+  follow: () => MatchFollower;
+}>;
+
 export type PatternRedactor = Readonly<{
   contains: (text: string) => boolean;
   /** Every match, or undefined over the size ceiling (withhold the text). */
   find: (text: string) => readonly PatternMatch[] | undefined;
+  /**
+   * The earliest match that more text could still complete after any scan
+   * window: a private key without its end line, or a curl command with lines
+   * still to come. A stream holds from its opener.
+   */
+  openFrom: (text: string) => OpenMatch | undefined;
   redact: (text: string) => RedactionResult;
 }>;
 
@@ -164,7 +184,9 @@ const patternConfig = z.strictObject({
 });
 type PatternConfig = z.infer<typeof patternConfig>;
 type Allowlist = z.infer<typeof allowlist>;
-let compiledPatterns: Promise<PatternConfig> | undefined;
+let compiledPatterns:
+  | Promise<Readonly<{ config: PatternConfig; open: readonly OpenRule[] }>>
+  | undefined;
 
 function entropy(value: string): number {
   const counts = new Map<string, number>();
@@ -279,19 +301,23 @@ export async function loadPatternRedactor(): Promise<PatternRedactor> {
   // The rule table loads on first use, so a host that never scans pays no
   // startup heap for it. A failed load is retried on the next call.
   compiledPatterns ??= import("./redaction-rules.generated.js").then(
-    ({ configuration }) => patternConfig.parse(configuration),
+    ({ configuration }) => {
+      const config = patternConfig.parse(configuration);
+      return { config, open: openRules(config.rules) };
+    },
     (cause: unknown) => {
       compiledPatterns = undefined;
       throw cause;
     },
   );
-  const config = await compiledPatterns;
+  const { config, open } = await compiledPatterns;
   const find = (text: string) =>
     text.length > maxTextLength ? undefined : [...patternMatches(text, config)];
   return {
     contains: (text) =>
       text.length > maxTextLength || !patternMatches(text, config).next().done,
     find,
+    openFrom: (text) => openFrom(text, open),
     redact: (text) => {
       const matches = find(text);
       if (matches === undefined)

@@ -1,5 +1,14 @@
 # @fungi.computer/veil
 
+## 0.10.2
+
+### Patch Changes
+
+- Changes since 0.10.1:
+
+  - fix(oyster): mask a held private key through its end line after the ceiling
+  - fix(oyster): hold an unfinished private key or curl command in the build log
+
 ## 0.10.1
 
 ### Patch Changes

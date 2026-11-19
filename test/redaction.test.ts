@@ -11,6 +11,8 @@ import {
   maskSpans,
   type KnownValueRedactor,
 } from "../src/redaction.js";
+import { RE2JS } from "re2js";
+import { openRules } from "../src/redaction-open.js";
 import { renderRedactionRules } from "../scripts/generate-redaction-rules.mjs";
 
 const ownerKey = new Uint8Array(32).fill(7);
@@ -299,6 +301,112 @@ it("does not mistake Git SHAs, UUIDs or discussions of API keys for an unknown k
   const redactor = await loadPatternRedactor();
   expect(redactor.contains(text)).toBe(false);
   expect(redactor.redact(text)).toEqual({ text, status: "clean" });
+});
+
+it("names the opener of a private key or curl command that more text could still complete", async () => {
+  const redactor = await loadPatternRedactor();
+  const begin = ["-----BEGIN", "OPENSSH PRIVATE KEY-----"].join(" ");
+  const end = ["-----END", "OPENSSH PRIVATE KEY-----"].join(" ");
+  const body =
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\n";
+  const key = `log line\n${begin}\n${body}`;
+  expect(redactor.openFrom(key)?.opener).toEqual({
+    start: 9,
+    end: 9 + begin.length,
+  });
+  expect(redactor.openFrom(`${key}${end}\n`)).toBeUndefined();
+  // A later unfinished key is held even after a finished one.
+  expect(redactor.openFrom(`${key}${end}\n${key}`)?.opener.start).toBe(
+    key.length + end.length + 1 + 9,
+  );
+  const curl = "curl https://example.test/";
+  expect(redactor.openFrom(`${curl}${"\n".repeat(11)}`)?.opener).toEqual({
+    start: 0,
+    end: 4,
+  });
+  expect(redactor.openFrom(`${curl}${"\n".repeat(12)}`)).toBeUndefined();
+  // RE2's `.` spans a bare carriage return, so it never ends a curl command.
+  expect(redactor.openFrom(`${curl}${"p\r".repeat(20)}`)?.opener.start).toBe(0);
+  expect(redactor.openFrom("plain build output\n")).toBeUndefined();
+});
+
+it("follows an unfinished match through later text to its end", async () => {
+  const redactor = await loadPatternRedactor();
+  const begin = ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ");
+  const key = redactor.openFrom(`${begin}\n${"A".repeat(80)}\n`)?.follow();
+  // The end line's tail split across two reads is still found.
+  expect(key?.read("tail -----END RSA PRIVATE KE")).toBeUndefined();
+  expect(key?.read("Y-----\nafter")).toBe("Y-----".length);
+  const curl = redactor.openFrom(`curl https://x.test/${"\n".repeat(10)}`);
+  const lines = curl?.follow();
+  expect(lines?.read("a\r\r")).toBeUndefined();
+  expect(lines?.read("b\nc\nd")).toBe(4);
+});
+
+it("fails the load when a held rule loses the span it is held by", async () => {
+  const { configuration } = await import("../src/redaction-rules.generated.js");
+  const compile = (replace: (source: string) => string) =>
+    openRules(
+      configuration.rules.map((rule) => ({
+        id: rule.id,
+        keywords: "keywords" in rule ? rule.keywords : [],
+        regex:
+          "regex" in rule
+            ? RE2JS.compile(
+                rule.id === "private-key" ? replace(rule.regex) : rule.regex,
+              )
+            : undefined,
+      })),
+    );
+  expect(compile((source) => source).map(({ id }) => id)).toEqual([
+    "private-key",
+    "curl-auth-header",
+    "curl-auth-user",
+  ]);
+  expect(() =>
+    compile((source) => source.replace("{64,}?", "{64,1000}?")),
+  ).toThrow(/private-key/u);
+  expect(() =>
+    // The rule's last `KEY(?: BLOCK)?-----` is its tail; the first is in the opener.
+    compile((source) =>
+      source.replace(/KEY\(\?: BLOCK\)\?-----$/u, "KEY-----"),
+    ),
+  ).toThrow(/private-key/u);
+});
+
+it("classifies every vendored rule with an unbounded quantifier", async () => {
+  const { configuration } = await import("../src/redaction-rules.generated.js");
+  // A regenerated table that adds or drops one fails here until it is
+  // classified: held from an opener by openFrom, or grown from an early match
+  // (the scan window's crossing-match hold covers it), or a known gap.
+  const classified = {
+    held: ["curl-auth-header", "curl-auth-user", "private-key"],
+    grownFromEarlyMatch: [
+      "1password-service-account-token",
+      "facebook-page-access-token",
+      "flyio-access-token",
+      "generic-api-key",
+      "jwt",
+      "jwt-base64",
+      "microsoft-teams-webhook",
+      "slack-app-token",
+      "slack-bot-token",
+      "slack-legacy-token",
+      "yandex-access-token",
+    ],
+    // Whitespace runs or a quoted value longer than a scan window.
+    knownGaps: [
+      "freemius-secret-key",
+      "kubernetes-secret-yaml",
+      "nuget-config-password",
+    ],
+  };
+  const unbounded = /\.\*|\.\+|\\s\*|\\s\+|\]\*|\]\+|\)\*|\)\+|\{\d+,\}/u;
+  const found = configuration.rules
+    .filter((rule) => "regex" in rule && unbounded.test(rule.regex))
+    .map(({ id }) => id)
+    .sort();
+  expect(found).toEqual(Object.values(classified).flat().sort());
 });
 
 it("honors gitleaks entropy and content allowlists but not an untrusted allow comment", async () => {
