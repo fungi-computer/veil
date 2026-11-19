@@ -1,5 +1,15 @@
 # @fungi.computer/veil
 
+## 0.11.1
+
+### Patch Changes
+
+- Changes since 0.11.0:
+
+  - fix(veil): give the workerd Connection packages a test:unit tier
+  - fix(veil): run the workerd Connection proofs in the merge gate
+  - fix(veil): send OAuth Connection requests with a manual redirect
+
 ## 0.11.0
 
 ### Minor Changes

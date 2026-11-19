@@ -113,13 +113,17 @@ export function createOAuthFlow(deps: {
       throw new ConnectionsError("unsupported");
     return { ...ports, open };
   };
-  /** Every discovery, registration and token request meets the same destination rules. */
+  /**
+   * Every discovery, registration and token request meets the same destination
+   * rules. Workers refuse `redirect: "error"`, so each hop is manual and a 3xx
+   * answer is refused rather than followed.
+   */
   const guardedFetch = async (
     url: string | URL,
     init?: RequestInit,
   ): Promise<Response> => {
     const ports = oauthPorts();
-    const request = new Request(url, { ...init, redirect: "error" });
+    const request = new Request(url, { ...init, redirect: "manual" });
     const target = new URL(request.url);
     if (target.protocol !== "https:" || target.username || target.password)
       throw new ConnectionsError("denied");
@@ -129,7 +133,12 @@ export function createOAuthFlow(deps: {
     } catch (cause) {
       throw new ConnectionsError("denied", { cause });
     }
-    return ports.fetch(request);
+    const response = await ports.fetch(request);
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new ConnectionsError("invalid_response");
+    }
+    return response;
   };
   /** The operator's registered provider by id; a bundle naming one this host no longer holds cannot be used. */
   const staticProvider = (id: string | undefined) => {
