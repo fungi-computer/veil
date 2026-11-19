@@ -1,5 +1,14 @@
 # @fungi.computer/veil
 
+## 0.11.0
+
+### Minor Changes
+
+- Changes since 0.10.2:
+
+  - feat(truffle): provide the claude subscription sign-in only through an
+    extension
+
 ## 0.10.2
 
 ### Patch Changes

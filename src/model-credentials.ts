@@ -8,7 +8,8 @@
  * shared or pooled. `subscriptionKillSwitch` can turn off a provider if it
  * objects or blocks tokens. Hosted BYOK uses API keys. The retired Codex
  * provider is forbidden on both hosts. An installed extension may fill a login
- * slot Fungi does not offer itself, locally and for one person.
+ * slot Fungi does not offer itself, locally and for one person: the Claude
+ * subscription sign-in is such a slot.
  * See wiki/3-resources/decisions/adr-byok-model-keys-v1.md.
  */
 
@@ -53,6 +54,12 @@ const retiredCodex: CredentialPermission = {
   reason: "Use OpenAI instead of the retired OpenAI Codex provider",
   source: "wiki/3-resources/decisions/adr-byok-model-keys-v1.md",
 };
+const claudeSubscriptionViaExtension: CredentialPermission = {
+  status: "extension",
+  reason:
+    "Fungi does not include Claude subscription sign-in; an installed extension may provide it",
+  source: "wiki/3-resources/decisions/adr-byok-model-keys-v1.md",
+};
 const apiKeyOnly = {
   api_key: { local: allowed, hosted: allowed },
   subscription: { local: providerNotOffered, hosted: providerNotOffered },
@@ -69,8 +76,12 @@ export const modelCredentialPolicy = Object.freeze({
   },
   anthropic: {
     api_key: { local: allowed, hosted: allowed },
-    // Local: Pi's Claude Pro/Max OAuth. Hosted: no Claude subscription login.
-    subscription: { local: allowed, hosted: notOffered },
+    // Local: no built-in Claude subscription sign-in; an installed extension
+    // may fill the slot for one person. Hosted: no Claude subscription login.
+    subscription: {
+      local: claudeSubscriptionViaExtension,
+      hosted: notOffered,
+    },
   },
   "openai-codex": {
     api_key: { local: retiredCodex, hosted: retiredCodex },

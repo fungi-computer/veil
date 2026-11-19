@@ -44,7 +44,9 @@ it("records one per-provider policy for local and hosted credentials", () => {
       source: "builtin",
     });
   expect(allowed("anthropic", "api_key", "hosted")).toBe(true);
-  expect(allowed("anthropic", "subscription", "local")).toBe(true);
+  // Fungi includes no Claude subscription sign-in: the slot belongs to an
+  // installed extension on Local, and nobody on hosted Fungi.
+  expect(allowed("anthropic", "subscription", "local")).toBe(false);
   expect(allowed("anthropic", "subscription", "hosted")).toBe(false);
   expect(
     modelCredentialPermission("anthropic", "subscription", "hosted"),
@@ -473,7 +475,6 @@ it("refuses an extension on every provider Fungi offers or forbids", () => {
   // Fungi offers these itself, so an extension may not take the slot.
   for (const [providerId, method] of [
     ["anthropic", "api_key"],
-    ["anthropic", "subscription"],
     ["openai", "api_key"],
     ["openai", "subscription"],
     ["openrouter", "api_key"],
@@ -538,7 +539,7 @@ it("changes no built-in decision when the source is builtin", () => {
   const hosts: readonly CredentialHost[] = ["local", "hosted"];
   const expected = {
     // [api_key local, api_key hosted, subscription local, subscription hosted]
-    anthropic: [true, true, true, false],
+    anthropic: [true, true, false, false],
     openai: [true, true, true, false],
     openrouter: [true, true, false, false],
     "openai-compatible": [true, true, false, false],
@@ -557,4 +558,51 @@ it("changes no built-in decision when the source is builtin", () => {
     );
     expect([providerId, actual]).toEqual([providerId, decisions]);
   }
+});
+
+it("leaves the Claude subscription slot to an installed extension, locally and for one person", () => {
+  const slot = {
+    providerId: "anthropic",
+    method: "subscription",
+    source: "extension",
+  } as const;
+  expect(
+    modelCredentialPermission("anthropic", "subscription", "local"),
+  ).toMatchObject({
+    status: "extension",
+  });
+  expect(loginAllowed({ ...slot, host: "local", scope: "user" }, {})).toBe(
+    true,
+  );
+  expect(loginAllowed({ ...slot, host: "local", scope: "team" }, {})).toBe(
+    false,
+  );
+  expect(loginAllowed({ ...slot, host: "hosted", scope: "user" }, {})).toBe(
+    false,
+  );
+  expect(
+    loginAllowed(
+      { ...slot, host: "local", scope: "user" },
+      { anthropic: true },
+    ),
+  ).toBe(false);
+  // Fungi's own sign-in never fills it, and API keys are unchanged.
+  expect(
+    loginAllowed(
+      { ...slot, source: "builtin", host: "local", scope: "user" },
+      {},
+    ),
+  ).toBe(false);
+  expect(
+    loginAllowed(
+      {
+        providerId: "anthropic",
+        method: "api_key",
+        host: "local",
+        scope: "user",
+        source: "builtin",
+      },
+      {},
+    ),
+  ).toBe(true);
 });
