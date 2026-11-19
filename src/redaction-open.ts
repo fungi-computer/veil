@@ -157,6 +157,7 @@ export function openFrom(
   if (earliest === undefined) return undefined;
   const { opener, rule } = earliest;
   return {
+    ruleId: rule.id,
     opener,
     follow: () => rule.follow(text, opener.end),
   };

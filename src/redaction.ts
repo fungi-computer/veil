@@ -53,6 +53,8 @@ export type MatchFollower = Readonly<{
 
 /** An unfinished match: its opener, and a follower for the text after. */
 export type OpenMatch = Readonly<{
+  /** The vendored rule that opened, such as `private-key`. */
+  ruleId: string;
   opener: TextSpan;
   /** Follows the match from the end of the scanned text. */
   follow: () => MatchFollower;

@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.11.2
+
+### Patch Changes
+
+- Changes since 0.11.1:
+
+  - fix(oyster): note an unclosed private key at the end of the build log
+
 ## 0.11.1
 
 ### Patch Changes
