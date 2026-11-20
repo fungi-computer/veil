@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.11.5",
+  "version": "0.11.6",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
@@ -111,8 +111,8 @@
   },
   "dependencies": {
     "@fungi.computer/cairn": "0.1.0",
-    "@fungi.computer/forage": "0.4.0",
-    "@fungi.computer/mycelium": "0.4.8",
+    "@fungi.computer/forage": "0.4.1",
+    "@fungi.computer/mycelium": "0.4.9",
     "@modelcontextprotocol/client": "2.0.0",
     "@nangohq/node": "0.71.6",
     "effect": "4.0.2",
@@ -122,7 +122,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@fungi.computer/watchdog": "0.1.4",
+    "@fungi.computer/watchdog": "0.1.5",
     "@modelcontextprotocol/server": "2.0.0",
     "@types/node": "24.13.3",
     "smol-toml": "1.8.0",
