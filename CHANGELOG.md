@@ -1,5 +1,15 @@
 # @fungi.computer/veil
 
+## 0.11.3
+
+### Patch Changes
+
+- Changes since 0.11.2:
+
+  - fix(veil): treat an edited record key id as tampering
+  - fix(veil): tell an unknown key id apart from a corrupt envelope
+  - fix(veil): retry the rule table after a failed parse
+
 ## 0.11.2
 
 ### Patch Changes

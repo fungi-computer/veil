@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { defineIdFamily } from "@fungi.computer/cairn";
 import type { SqlStore } from "./connections/contract.js";
@@ -10,9 +11,17 @@ import type { SqlStore } from "./connections/contract.js";
  * leave the store only into a callback. Listings carry no secret.
  */
 
-/** Stable, secret-free reason a credential could not be sealed, opened or stored. */
+/**
+ * Stable, secret-free reason a credential could not be sealed, opened or
+ * stored. `unknown-key`: the envelope names a key id the keyring does not
+ * hold, a configuration fault a restored key fixes. `denied`: the envelope is
+ * malformed, bound elsewhere, or does not decrypt, which no keyring change fixes.
+ */
 export class CredentialError extends Error {
-  constructor(readonly code: "unavailable" | "denied" | "absent" | "limit") {
+  constructor(
+    readonly code:
+      "unavailable" | "denied" | "unknown-key" | "absent" | "limit",
+  ) {
     super(code);
     this.name = "CredentialError";
   }
@@ -118,18 +127,22 @@ function credentialSealer(
       context: readonly (string | null)[],
       sealed: string,
     ): Promise<string> {
+      const envelope = Schema.decodeUnknownOption(
+        Schema.fromJsonString(envelopeSchema(version)),
+      )(sealed);
+      if (Option.isNone(envelope)) throw new CredentialError("denied");
+      const { keyId, iv, ciphertext } = envelope.value;
+      const found = keys.get(keyId);
+      if (found === undefined) throw new CredentialError("unknown-key");
       try {
-        const envelope = Schema.decodeUnknownSync(
-          Schema.fromJsonString(envelopeSchema(version)),
-        )(sealed);
         const plaintext = await crypto.subtle.decrypt(
           {
             name: "AES-GCM",
-            iv: Uint8Array.from(Buffer.from(envelope.iv, "base64url")),
-            additionalData: binding(envelope.keyId, context),
+            iv: Uint8Array.from(Buffer.from(iv, "base64url")),
+            additionalData: binding(keyId, context),
           },
-          await key(envelope.keyId),
-          Uint8Array.from(Buffer.from(envelope.ciphertext, "base64url")),
+          await found,
+          Uint8Array.from(Buffer.from(ciphertext, "base64url")),
         );
         return new TextDecoder().decode(plaintext);
       } catch {
@@ -212,7 +225,16 @@ export function createOwnerCredentialSealer(options: {
       return (await load(true)).seal([ownerId, ...context], credential);
     },
     async open(context: readonly (string | null)[], sealed: string) {
-      return (await load(false)).open([ownerId, ...context], sealed);
+      const records = await load(false);
+      // Only the wrapped data key can name a key the keyring lacks. A record
+      // has the one "data" key, so any other key id there is tampering.
+      return records
+        .open([ownerId, ...context], sealed)
+        .catch((cause: unknown) => {
+          throw cause instanceof CredentialError && cause.code === "unknown-key"
+            ? new CredentialError("denied")
+            : cause;
+        });
     },
     /** Rewrap without touching any credential. Missing/deleted keys refuse. */
     async rewrap(): Promise<void> {

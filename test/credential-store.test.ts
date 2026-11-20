@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { fromNodeSqlite } from "@fungi.computer/watchdog/node-sqlite";
@@ -13,6 +14,24 @@ import {
 const key = (fill: number) =>
   Buffer.from(new Uint8Array(32).fill(fill)).toString("base64url");
 const keyring = { activeKeyId: "k1", keys: { k1: key(1) } };
+const envelope = Schema.fromJsonString(
+  Schema.Struct({
+    version: Schema.Number,
+    keyId: Schema.String,
+    iv: Schema.String,
+    ciphertext: Schema.String,
+  }),
+);
+
+/** The same envelope with its ciphertext's first character changed. */
+function tampered(sealed: string): string {
+  const parsed = Schema.decodeUnknownSync(envelope)(sealed);
+  const first = parsed.ciphertext.startsWith("A") ? "B" : "A";
+  return JSON.stringify({
+    ...parsed,
+    ciphertext: `${first}${parsed.ciphertext.slice(1)}`,
+  });
+}
 
 describe("owner envelope custody", () => {
   it("refuses copied ciphertext and copied wrapped keys under another owner", async () => {
@@ -42,6 +61,15 @@ describe("owner envelope custody", () => {
       });
       await expect(
         first.open(["credential-2", "mcp"], sealed),
+      ).rejects.toMatchObject({ code: "denied" });
+      // The record layer has one key id, so an edited one is tampering, not a
+      // missing keyring key.
+      const parsed = Schema.decodeUnknownSync(envelope)(sealed);
+      await expect(
+        first.open(
+          context,
+          Schema.encodeSync(envelope)({ ...parsed, keyId: "rotated" }),
+        ),
       ).rejects.toMatchObject({ code: "denied" });
     } finally {
       database.close();
@@ -149,6 +177,20 @@ describe("credential sealer", () => {
         "test.v1",
       ).open(["a", "b"], sealed),
     ).rejects.toMatchObject({ code: "denied" });
+    // A keyring without the envelope's key id is a configuration fault, told
+    // apart from a corrupt or tampered envelope.
+    await expect(
+      createCredentialSealer(
+        { activeKeyId: "k2", keys: { k2: key(2) } },
+        "test.v1",
+      ).open(["a", "b"], sealed),
+    ).rejects.toMatchObject({ code: "unknown-key" });
+    await expect(
+      sealer.open(["a", "b"], tampered(sealed)),
+    ).rejects.toMatchObject({ code: "denied" });
+    await expect(sealer.open(["a", "b"], "{}")).rejects.toMatchObject({
+      code: "denied",
+    });
   });
 
   it("refuses a malformed keyring", () => {

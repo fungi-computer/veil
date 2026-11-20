@@ -3,6 +3,7 @@ import { RE2JS } from "re2js";
 import { z } from "zod";
 import { VeilError } from "./index.js";
 import { openFrom, openRules, type OpenRule } from "./redaction-open.js";
+import type { configuration as generatedRules } from "./redaction-rules.generated.js";
 
 /**
  * Veil's one redactor. Masking is the backstop; injection is the control:
@@ -186,9 +187,8 @@ const patternConfig = z.strictObject({
 });
 type PatternConfig = z.infer<typeof patternConfig>;
 type Allowlist = z.infer<typeof allowlist>;
-let compiledPatterns:
-  | Promise<Readonly<{ config: PatternConfig; open: readonly OpenRule[] }>>
-  | undefined;
+/** The rule table's decoded shape; the loader still parses it on first use. */
+export type GeneratedRuleTable = typeof generatedRules;
 
 function entropy(value: string): number {
   const counts = new Map<string, number>();
@@ -298,21 +298,38 @@ function* patternMatches(
  * Uses the unchanged gitleaks defaults: RE2, keywords, capture groups, entropy
  * and content allowlists. No filename/commit context or inline suppression comments
  * are trusted here. Unbounded pattern lengths cannot use known-value holdback.
+ * The returned loader reads the rule table as its TOML decodes, parses and
+ * compiles it once, then reuses it.
  */
-export async function loadPatternRedactor(): Promise<PatternRedactor> {
-  // The rule table loads on first use, so a host that never scans pays no
-  // startup heap for it. A failed load is retried on the next call.
-  compiledPatterns ??= import("./redaction-rules.generated.js").then(
-    ({ configuration }) => {
-      const config = patternConfig.parse(configuration);
-      return { config, open: openRules(config.rules) };
-    },
-    (cause: unknown) => {
-      compiledPatterns = undefined;
-      throw cause;
-    },
-  );
-  const { config, open } = await compiledPatterns;
+export function patternRedactorLoader(
+  readRules: () => Promise<GeneratedRuleTable>,
+): () => Promise<PatternRedactor> {
+  let compiled:
+    | Promise<Readonly<{ config: PatternConfig; open: readonly OpenRule[] }>>
+    | undefined;
+  return async () => {
+    // A failed read, parse or compile is retried on the next call, so no
+    // rejection stays cached.
+    compiled ??= readRules()
+      .then((rules) => {
+        const config = patternConfig.parse(rules);
+        return { config, open: openRules(config.rules) };
+      })
+      .catch((cause: unknown) => {
+        compiled = undefined;
+        throw cause;
+      });
+    return patternRedactor(await compiled);
+  };
+}
+
+function patternRedactor({
+  config,
+  open,
+}: Readonly<{
+  config: PatternConfig;
+  open: readonly OpenRule[];
+}>): PatternRedactor {
   const find = (text: string) =>
     text.length > maxTextLength ? undefined : [...patternMatches(text, config)];
   return {
@@ -335,6 +352,20 @@ export async function loadPatternRedactor(): Promise<PatternRedactor> {
           };
     },
   };
+}
+
+// The rule table loads on first use, so a host that never scans pays no
+// startup heap for it.
+const loadGeneratedRules = patternRedactorLoader(
+  async () => (await import("./redaction-rules.generated.js")).configuration,
+);
+
+/**
+ * Secondary detection of unknown keys in complete text (not streaming), with
+ * gitleaks' default rule table.
+ */
+export async function loadPatternRedactor(): Promise<PatternRedactor> {
+  return loadGeneratedRules();
 }
 
 /** Masks each span of `text`, unioning overlapping spans into one mask. */
