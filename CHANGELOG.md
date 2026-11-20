@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.11.5
+
+### Patch Changes
+
+- Changes since 0.11.4:
+
+  - fix(veil): hold back only text that could begin a stored value
+
 ## 0.11.4
 
 ### Patch Changes

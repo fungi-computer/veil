@@ -20,7 +20,9 @@ const constructors = {
   "owner raw values": (values: readonly string[]) =>
     Promise.resolve(createKnownValueRedactor(values)),
   "Session fingerprints": async (values: readonly string[]) =>
-    createFingerprintRedactor(await createFingerprintSet(ownerKey, values)),
+    createFingerprintRedactor(
+      await createFingerprintSet(ownerKey, values, { prefixes: true }),
+    ),
 } satisfies Record<
   string,
   (values: readonly string[]) => Promise<KnownValueRedactor>
@@ -159,14 +161,30 @@ describe.each(Object.entries(constructors))("%s", (_name, make) => {
     expect((await stream.write("after finish")).status).toBe("unavailable");
   });
 
-  it("holds exactly longest variant minus one and flushes clean text unchanged", async () => {
-    // ASCII secret's hex encoding is its longest variant: 40 characters.
-    const stream = (await make(["vault-key-1234567890"])).stream();
-    expect((await stream.write(".".repeat(100))).text).toBe(".".repeat(61));
-    expect(await stream.finish()).toEqual({
-      text: ".".repeat(39),
-      status: "clean",
-    });
+  it("releases text no stored value can begin, however long the value", async () => {
+    // A sign-in token is often thousands of characters; output must not wait on it.
+    const stream = (await make(["vault-token-".padEnd(2000, "x")])).stream();
+    expect((await stream.write("build step 1/12\n")).text).toBe(
+      "build step 1/12\n",
+    );
+    expect((await stream.write(".".repeat(100))).text).toBe(".".repeat(100));
+    expect(await stream.finish()).toEqual({ text: "", status: "clean" });
+  });
+
+  it("holds a stored value cut at the end of the text, from its first character", async () => {
+    // Assembled at runtime so the public-split secret scan sees no literal.
+    const secret = ["vault-key", "1234567890"].join("-");
+    const redactor = await make([secret]);
+    for (const form of [secret, `Bearer ${secret}`])
+      for (let cut = 1; cut < form.length; cut++) {
+        const stream = redactor.stream();
+        const partial = form.slice(0, cut);
+        expect((await stream.write(`out: ${partial}`)).text, partial).toBe(
+          "out: ",
+        );
+        // Not a stored value once the text ends, so it leaves unchanged.
+        expect((await stream.finish()).text, partial).toBe(partial);
+      }
   });
 
   it("withholds a stream whose writes overlap instead of interleaving output", async () => {
@@ -259,10 +277,13 @@ it("gives Session hosts no stored value and no key that can open the record", as
     "vault.test.v1",
   );
   const sealed = await sealer.seal(["team", "secret"], secret);
-  const set = await createFingerprintSet(ownerKey, [secret]);
+  const set = await createFingerprintSet(ownerKey, [secret], {
+    prefixes: true,
+  });
   const wire = JSON.stringify(set);
   for (const form of [
     secret,
+    secret.slice(0, 7),
     Buffer.from(secret).toString("base64"),
     Buffer.from(secret).toString("hex"),
     encodeURIComponent(secret),
@@ -279,6 +300,17 @@ it("gives Session hosts no stored value and no key that can open the record", as
   expect((await redactor.redact(`env: ${secret}`)).text).toBe(
     "env: [REDACTED]",
   );
+});
+
+it("holds the last seven characters when a set carries no prefixes", async () => {
+  // Without prefix fingerprints any short tail could begin a stored value.
+  const stream = (
+    await createFingerprintRedactor(
+      await createFingerprintSet(ownerKey, ["vault-token-".padEnd(2000, "x")]),
+    )
+  ).stream();
+  expect((await stream.write("build step 1/12\n")).text).toBe("build ste");
+  expect((await stream.finish()).text).toBe("p 1/12\n");
 });
 
 it("detects an unknown GitHub token in a paste without any stored value", async () => {

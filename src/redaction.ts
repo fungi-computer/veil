@@ -394,17 +394,24 @@ function replaceMarked(text: string, marks: Uint8Array): string {
   return output.join("");
 }
 
-/** Marks every registered variant in `text`; resolves whether any matched. */
 type Matcher = Readonly<{
-  holdback: number;
+  /** Marks every registered variant in `text`; resolves whether any matched. */
   mark: (text: string, marks: Uint8Array) => Promise<boolean>;
+  /**
+   * The earliest index where a registered variant could begin and still run
+   * past the end of `text`, or `text.length` when none can.
+   */
+  pendingFrom: (text: string) => Promise<number>;
 }>;
 
 /**
- * Streams hold back the longest variant's length minus one. A marked run that
- * reaches into that tail stays held, raw, until no overlapping value can extend
- * it; only settled text leaves, already redacted. The tail is never released
- * raw, including at finish or at the size ceiling (which withholds instead).
+ * Streams hold back only text that could begin a stored value: from the
+ * earliest place a variant could start and still run past the end. Text no
+ * value can begin leaves at once, however long the stored values are. A marked
+ * run that reaches into the held tail stays held, raw, until no overlapping
+ * value can extend it; only settled text leaves, already redacted. Only whole
+ * values are redacted: a held tail that never completes a value is released
+ * at finish. The size ceiling withholds the stream instead of releasing it.
  */
 function knownStream(matcher: Matcher | null): RedactionStream {
   let held = "";
@@ -426,10 +433,10 @@ function knownStream(matcher: Matcher | null): RedactionStream {
       const marks = new Uint8Array(held.length);
       // A rejection leaves `busy` set, so every later call withholds.
       const found = await matcher.mark(held, marks);
+      let settled = await matcher.pendingFrom(held);
       busy = false;
       // An overlapping call during the await withheld the stream.
       if (poisoned()) return withhold();
-      let settled = Math.max(0, held.length - matcher.holdback);
       if (settled > 0 && marks[settled - 1] === 1)
         while (settled > 0 && marks[settled - 1] === 1) settled--;
       const text = replaceMarked(
@@ -491,7 +498,21 @@ export function createKnownValueRedactor(
   if (values === null || !validValues(values)) return knownRedactor(null);
   const registered = [...new Set(values.flatMap(variants))];
   return knownRedactor({
-    holdback: Math.max(0, ...registered.map((value) => value.length - 1)),
+    pendingFrom: (text) => {
+      let earliest = text.length;
+      for (const value of registered) {
+        // A start inside the text where the rest of it begins this value.
+        let start = text.indexOf(
+          value.charAt(0),
+          Math.max(0, text.length - value.length + 1),
+        );
+        while (start !== -1 && start < earliest) {
+          if (value.startsWith(text.slice(start))) earliest = start;
+          else start = text.indexOf(value.charAt(0), start + 1);
+        }
+      }
+      return Promise.resolve(earliest);
+    },
     mark: (text, marks) => {
       let found = false;
       for (const value of registered) {
@@ -513,12 +534,19 @@ export function createKnownValueRedactor(
  * holds no value and no key that can open a sealed record. Each entry is
  * `[anchor, length, fingerprint]`: a keyed rolling hash of the variant's first
  * eight code units (the scan prefilter), its length and its HMAC.
+ *
+ * `prefixes`, when the owner includes them, are HMACs of each variant's first
+ * one to seven code units, so a stream holds a short tail only when it begins
+ * a stored value. Whoever holds the set can recover those first seven code
+ * units by trying every short string, so only an owner whose Session runs in
+ * its own custody includes them. Without them a stream holds its last seven.
  */
 export type FingerprintSet = Readonly<{
   version: 1;
   /** base64url HMAC-SHA256 subkey (32 bytes). */
   key: string;
   entries: readonly (readonly [number, number, string])[];
+  prefixes?: readonly string[];
 }>;
 
 const fingerprintSet = z.strictObject({
@@ -537,6 +565,10 @@ const fingerprintSet = z.strictObject({
       ]),
     )
     .max(maxValues * 16),
+  prefixes: z
+    .array(z.base64url().length(43))
+    .max(maxValues * 16 * (anchorLength - 1))
+    .optional(),
 });
 
 /** Polynomial hash modulo 2^32 with a key-derived odd base. */
@@ -575,11 +607,14 @@ async function fingerprint(key: HmacKey, window: string): Promise<string> {
  * HKDF-SHA256 with a redaction-only label derives the HMAC subkey, so the set
  * cannot open records. Refuses (`invalid_input`) a key shorter than 32 bytes and
  * values Vault must not store: empty, under eight code units, ill-formed or
- * over the ceilings.
+ * over the ceilings. `prefixes` adds the short-prefix HMACs described on
+ * {@link FingerprintSet}; include them only when the Session is in the owner's
+ * own custody.
  */
 export async function createFingerprintSet(
   ownerKey: Uint8Array,
   values: readonly string[],
+  options: Readonly<{ prefixes?: boolean }> = {},
 ): Promise<FingerprintSet> {
   if (
     ownerKey.byteLength < 32 ||
@@ -609,17 +644,24 @@ export async function createFingerprintSet(
   const key = await hmacKey(subkey);
   const base = anchorBase(subkey);
   const entries: [number, number, string][] = [];
-  for (const variant of new Set(values.flatMap(variants)))
+  const prefixes = new Set<string>();
+  for (const variant of new Set(values.flatMap(variants))) {
     entries.push([
       anchorAt(variant, 0, base),
       variant.length,
       await fingerprint(key, variant),
     ]);
-  return {
+    if (options.prefixes === true)
+      for (let length = 1; length < anchorLength; length++)
+        prefixes.add(await fingerprint(key, variant.slice(0, length)));
+  }
+  const set: FingerprintSet = {
     version: 1,
     key: Buffer.from(subkey).toString("base64url"),
     entries,
   };
+  if (options.prefixes !== true) return set;
+  return { ...set, prefixes: [...prefixes] };
 }
 
 /**
@@ -643,11 +685,47 @@ export async function createFingerprintRedactor(
     lengths.set(anchor, (lengths.get(anchor) ?? new Set()).add(length));
     fingerprints.add(print);
   }
+  const prefixes =
+    parsed.data.prefixes === undefined
+      ? undefined
+      : new Set(parsed.data.prefixes);
+  const longest = Math.max(
+    0,
+    ...parsed.data.entries.map(([, length]) => length),
+  );
   return knownRedactor({
-    holdback: Math.max(
-      0,
-      ...parsed.data.entries.map(([, length]) => length - 1),
-    ),
+    pendingFrom: async (text) => {
+      if (lengths.size === 0) return text.length;
+      // An anchored start whose value could still run past the end.
+      const first = Math.max(0, text.length - longest + 1);
+      if (first + anchorLength <= text.length) {
+        let hash = anchorAt(text, first, base);
+        for (let start = first; ; start++) {
+          for (const length of lengths.get(hash) ?? [])
+            if (start + length > text.length) return start;
+          if (start + anchorLength >= text.length) break;
+          hash =
+            (Math.imul(
+              (hash - Math.imul(text.charCodeAt(start), shift)) | 0,
+              base,
+            ) +
+              text.charCodeAt(start + anchorLength)) >>>
+            0;
+        }
+      }
+      // A tail too short to anchor: held only when it begins a variant.
+      for (
+        let start = Math.max(0, text.length - anchorLength + 1);
+        start < text.length;
+        start++
+      )
+        if (
+          prefixes === undefined ||
+          prefixes.has(await fingerprint(key, text.slice(start)))
+        )
+          return start;
+      return text.length;
+    },
     mark: async (text, marks) => {
       let found = false;
       if (text.length < anchorLength || lengths.size === 0) return found;
