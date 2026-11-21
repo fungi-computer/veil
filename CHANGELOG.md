@@ -1,5 +1,13 @@
 # @fungi.computer/veil
 
+## 0.11.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/forage@0.5.0
+  - @fungi.computer/mycelium@0.4.10
+
 ## 0.11.6
 
 ### Patch Changes
