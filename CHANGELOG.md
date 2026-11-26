@@ -1,5 +1,12 @@
 # @fungi.computer/veil
 
+## 0.11.21
+
+### Patch Changes
+
+- @fungi.computer/forage@0.6.3
+  - @fungi.computer/mycelium@0.5.9
+
 ## 0.11.20
 
 ### Patch Changes

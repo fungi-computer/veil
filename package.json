@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/veil",
-  "version": "0.11.20",
+  "version": "0.11.21",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Team-authorized credential custody and provider access",
   "type": "module",
@@ -111,8 +111,8 @@
   },
   "dependencies": {
     "@fungi.computer/cairn": "0.1.1",
-    "@fungi.computer/forage": "0.6.2",
-    "@fungi.computer/mycelium": "0.5.8",
+    "@fungi.computer/forage": "0.6.3",
+    "@fungi.computer/mycelium": "0.5.9",
     "@modelcontextprotocol/client": "2.0.0",
     "@nangohq/node": "0.71.6",
     "effect": "4.0.2",
